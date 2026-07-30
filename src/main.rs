@@ -300,16 +300,8 @@ impl SqliteFs {
                 .collect();
             for (child_name, child_cid) in child_rows {
                 let ino = ino_gen.next();
-                // Look up file size from manifest.
-                let size = Self::file_size_from_cid(db, &child_cid);
-                entries.insert(
-                    ino,
-                    Entry::File {
-                        size,
-                        manifest_cid: Some(child_cid),
-                        v1_2025_cid: None,
-                    },
-                );
+                let entry = Self::child_entry_from_cid(db, &child_cid);
+                entries.insert(ino, entry);
                 dir_children.insert(child_name, ino);
             }
             let ref_ino = ino_gen.next();
@@ -325,29 +317,40 @@ impl SqliteFs {
         Ok(refs_children)
     }
 
-    fn file_size_from_cid(db: &rusqlite::Connection, cid: &[u8]) -> u64 {
-        let data: Vec<u8> = match db.query_row(
-            "SELECT data FROM chunks WHERE hash = ?1",
-            rusqlite::params![cid],
-            |r| r.get(0),
-        ) {
-            Ok(d) => d,
-            Err(_) => return 0,
-        };
-        let Some(hashes) = dag::decode_file_manifest(&data) else {
-            return 0;
-        };
-        let mut total: u64 = 0;
-        for h in hashes {
-            if let Ok(chunk_data) = db.query_row(
+    /// Load a child CID from chunks — returns a File or Symlink entry.
+    fn child_entry_from_cid(db: &rusqlite::Connection, cid: &[u8]) -> Entry {
+        let data: Vec<u8> = db
+            .query_row(
                 "SELECT data FROM chunks WHERE hash = ?1",
-                rusqlite::params![h.to_vec()],
-                |r| r.get::<_, Vec<u8>>(0),
-            ) {
-                total += chunk_data.len() as u64;
-            }
+                rusqlite::params![cid],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        if let Some(target) = dag::decode_symlink(&data) {
+            return Entry::Symlink { target };
         }
-        total
+        let size = if dag::is_file_manifest(&data) {
+            let mut total: u64 = 0;
+            if let Some(hashes) = dag::decode_file_manifest(&data) {
+                for h in &hashes {
+                    if let Ok(chunk_data) = db.query_row(
+                        "SELECT data FROM chunks WHERE hash = ?1",
+                        rusqlite::params![h.to_vec()],
+                        |r| r.get::<_, Vec<u8>>(0),
+                    ) {
+                        total += chunk_data.len() as u64;
+                    }
+                }
+            }
+            total
+        } else {
+            0
+        };
+        Entry::File {
+            size,
+            manifest_cid: Some(cid.to_vec()),
+            v1_2025_cid: None,
+        }
     }
 
     /// Resolve a hex hash prefix in .sqlitefs/c/ into a Dir with the commit's tree.
@@ -390,15 +393,8 @@ impl SqliteFs {
             .collect();
         for (child_name, child_cid) in child_rows {
             let ino = ino_gen.next();
-            let size = Self::file_size_from_cid(db, &child_cid);
-            entries.insert(
-                ino,
-                Entry::File {
-                    size,
-                    manifest_cid: Some(child_cid),
-                    v1_2025_cid: None,
-                },
-            );
+            let entry = Self::child_entry_from_cid(db, &child_cid);
+            entries.insert(ino, entry);
             dir_children.insert(child_name, ino);
         }
         let dir_ino = ino_gen.next();
@@ -516,9 +512,13 @@ impl SqliteFs {
                     // ponytail: file was created but never written to; skip.
                     continue;
                 }
-                Some(Entry::Symlink { .. }) => {
-                    // ponytail: symlinks not committed into DAG yet.
-                    continue;
+                Some(Entry::Symlink { target }) => {
+                    let (sym_dag, sym_cid) = dag::encode_symlink(target);
+                    let _ = self.db.execute(
+                        "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+                        rusqlite::params![sym_cid.to_bytes(), sym_dag],
+                    );
+                    sym_cid.to_bytes()
                 }
                 None => continue,
             };

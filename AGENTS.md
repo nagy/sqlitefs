@@ -71,7 +71,7 @@ See `docs/adr/` for the full record. Summary:
 - **`.sqlitefs/c/<hash-prefix>/`** — ✓ (prefix lookup in commits table, cached)
 - **`setattr`** — ~~truncate-to-zero~~ ✓ | chmod, utimes — still not implemented
 - **GC** — delete unreachable chunks, user-initiated VACUUM
-- **Symlinks in DAG** — currently not persisted in commits (marked as ponytail skip)
+- **Symlinks in DAG** — ✓ (dag-pb UnixFS type Symlink, roundtrips through chunks)
 - **Recursive snapshot tree refresh on `rename`/`rmdir`/`mkdir`** — ✓ (auto-commit rebuilds snapshot tree)
 - **NixOS VM test** — like nixfs has
 - **v1-2025 CID interop validation** — compare against ipfs-chainer / Kubo output

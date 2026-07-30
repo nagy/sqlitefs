@@ -259,6 +259,40 @@ pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]]) -> (Vec<u8>, Cid) {
     (buf, cid)
 }
 
+// ---------------------------------------------------------------------------
+// symlink — dag-pb node with UnixFS type Symlink (0x04)
+// ---------------------------------------------------------------------------
+
+/// Encode a symlink as a dag-pb node. Data = [0x08, 0x04] + target bytes.
+/// No links. CIDv1 dag-pb.
+pub fn encode_symlink(target: &str) -> (Vec<u8>, Cid) {
+    let mut unixfs = vec![0x08, 0x04];
+    unixfs.extend_from_slice(target.as_bytes());
+    let data = encode_pb_node(&unixfs, &[]);
+    let cid = Cid::hash_dag_pb(&data);
+    (data, cid)
+}
+
+/// Decode a symlink dag-pb node, returning the target path.
+/// Returns None if the node is not a symlink.
+pub fn decode_symlink(data: &[u8]) -> Option<String> {
+    // dag-pb: field 1 (Data) = 0x0a <len> <unixfs_type: 0x08, 0x04> <target...>
+    if data.len() < 5 || data[0] != 0x0a {
+        return None;
+    }
+    let data_len = data[1] as usize;
+    if data.len() < 2 + data_len || data_len < 2 || &data[2..4] != b"\x08\x04" {
+        return None;
+    }
+    let target = &data[4..2 + data_len];
+    Some(String::from_utf8_lossy(target).into_owned())
+}
+
+/// Peek at a chunk data blob and return true if it's a file manifest (dag-cbor array).
+pub fn is_file_manifest(data: &[u8]) -> bool {
+    !data.is_empty() && data[0] >= 0x80 && data[0] <= 0x9f
+}
+
 /// Parse a file manifest CBOR array, returning chunk hashes.
 /// Returns None on parse failure.
 pub fn decode_file_manifest(data: &[u8]) -> Option<Vec<[u8; 32]>> {
@@ -482,6 +516,21 @@ mod tests {
         assert_eq!(data, vec![0x80]); // CBOR empty array
         let decoded = decode_file_manifest(&data).unwrap();
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_symlink_roundtrip() {
+        let target = "/some/path/to/target";
+        let (data, cid) = encode_symlink(target);
+        assert_eq!(cid.codec(), DAG_PB);
+        let decoded = decode_symlink(&data).unwrap();
+        assert_eq!(decoded, target);
+    }
+
+    #[test]
+    fn test_symlink_not_a_file_manifest() {
+        let (data, _) = encode_symlink("foo");
+        assert!(!is_file_manifest(&data));
     }
 
     #[test]
