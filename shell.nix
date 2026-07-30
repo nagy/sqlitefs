@@ -11,6 +11,7 @@ pkgs.mkShell {
     pkgs.pkg-config
   ];
   buildInputs = [
+    pkgs.fuse3
     pkgs.sqlite
   ];
 }

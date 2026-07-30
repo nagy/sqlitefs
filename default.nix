@@ -3,6 +3,7 @@
   lib ? pkgs.lib,
   rustPlatform ? pkgs.rustPlatform,
   pkg-config ? pkgs.pkg-config,
+  fuse3 ? pkgs.fuse3,
   sqlite ? pkgs.sqlite,
 }:
 rustPlatform.buildRustPackage {
@@ -12,7 +13,7 @@ rustPlatform.buildRustPackage {
   cargoLock = { lockFile = ./Cargo.lock; };
   strictDeps = true;
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [ sqlite ];
+  buildInputs = [ fuse3 sqlite ];
   meta = {
     description = "Versioned content-addressed filesystem in a single SQLite file";
     license = lib.licenses.agpl3Plus;
