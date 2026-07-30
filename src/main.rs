@@ -665,7 +665,17 @@ impl fuser::Filesystem for SqliteFs {
             if !df.data.is_empty() {
                 let chunks = cdc::chunk_file(&df.data);
                 let chunk_hashes: Vec<[u8; 32]> = chunks.iter().map(|(h, _)| *h).collect();
-                for (hash, chunk_data) in chunks {
+
+                // Build cumulative offsets for CDC chunk span tracking.
+                let mut cdc_spans: Vec<([u8; 32], usize, usize)> = Vec::new();
+                let mut cdc_off: usize = 0;
+                for (hash, data) in &chunks {
+                    let end = cdc_off + data.len();
+                    cdc_spans.push((*hash, cdc_off, end));
+                    cdc_off = end;
+                }
+
+                for (hash, chunk_data) in &chunks {
                     let _ = self.db.execute(
                         "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
                         rusqlite::params![hash.to_vec(), chunk_data],
@@ -680,6 +690,7 @@ impl fuser::Filesystem for SqliteFs {
 
                 // Build v1-2025 DAG (IPFS-compatible) from the assembled file.
                 let v1_dag = dag::build_v1_2025_dag(&df.data);
+
                 for block in &v1_dag.blocks {
                     let _ = self.db.execute(
                         "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
@@ -689,6 +700,18 @@ impl fuser::Filesystem for SqliteFs {
                         "INSERT OR IGNORE INTO block_index (v1_2025_cid, file_cid, block_offset, block_length) VALUES (?1, ?2, ?3, ?4)",
                         rusqlite::params![block.cid.to_bytes(), mc.to_bytes(), block.file_offset as i64, block.data.len() as i64],
                     );
+
+                    // Map backing CDC chunks for this v1-2025 block.
+                    let block_start = block.file_offset as usize;
+                    let block_end = block_start + block.data.len();
+                    for &(ref cdc_hash, cdc_start, cdc_end) in &cdc_spans {
+                        if cdc_end > block_start && cdc_start < block_end {
+                            let _ = self.db.execute(
+                                "INSERT OR IGNORE INTO block_chunks (v1_2025_cid, chunk_hash) VALUES (?1, ?2)",
+                                rusqlite::params![block.cid.to_bytes(), cdc_hash.to_vec()],
+                            );
+                        }
+                    }
                 }
 
                 if let Some(Entry::File {
