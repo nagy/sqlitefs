@@ -15,7 +15,7 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 ├── .gitignore
 ├── LICENSE              # AGPL-3.0
 ├── src/
-│   ├── main.rs          # CLI (init + mount), writable FUSE + read-only .sqlitefs/
+│   ├── main.rs          # CLI (init + mount), writable FUSE + .sqlitefs/ snapshots + tag + rename + symlinks
 │   ├── dag.rs           # CIDv1, dag-pb, dag-cbor, v1-2025 UnixFS DAG builder
 │   └── cdc.rs           # Content-defined chunking via FastCDC v2020 + SHA-256
 └── docs/
@@ -42,6 +42,38 @@ See `docs/adr/` for the full record. Summary:
 - **Key crates (planned)**: none pending
 - **Chunking**: FastCDC (pluggable — may evaluate alternatives like rapidCDC later)
 - **UnixFS v1-2025**: custom DAG builder (raw leaves, balanced dag-pb tree, per-block offsets). No existing mature Rust impl — validate against ipfs-chainer reference
+
+## FUSE operations implemented
+
+| Operation | Status |
+|-----------|--------|
+| `lookup`, `getattr`, `readdir` | ✓ |
+| `mkdir`, `rmdir` | ✓ (with auto-commit) |
+| `create`, `open`, `write`, `release`, `read` | ✓ (CDC + commit on release) |
+| `unlink` | ✓ (with auto-commit) |
+| `rename` | ✓ (cross-directory, overwrite, auto-commit) |
+| `symlink`, `readlink` | ✓ |
+| `forget` | ✓ |
+| `getxattr`, `listxattr` | Stub (no xattrs) |
+| `setattr` (truncate, chmod, utimes) | Not implemented |
+| `flush`, `fsync` | Not needed (no-op ok) |
+
+## Snapshot model
+
+- **Auto-commit**: every 60s if dirty, checked on `lookup`/`create`/`open`
+- **Manual named snapshot**: `touch .sqlitefs/tag/<name>` creates a named ref
+- **Snapshot browsing**: `.sqlitefs/refs/<name>/` (hidden from readdir)
+- **Hash access** (`.sqlitefs/c/<hash>/`): not yet implemented
+
+## Remaining work
+
+- **`.sqlitefs/c/<hash-prefix>/`** — direct commit access by hash
+- **`setattr`** — truncate, chmod, utimes
+- **GC** — delete unreachable chunks, user-initiated VACUUM
+- **Symlinks in DAG** — currently not persisted in commits (marked as ponytail skip)
+- **Recursive snapshot tree refresh on `rename`/`rmdir`/`mkdir`** — only `commit_as_ref` refreshes
+- **NixOS VM test** — like nixfs has
+- **v1-2025 CID interop validation** — compare against ipfs-chainer / Kubo output
 
 ## Rules for agents
 

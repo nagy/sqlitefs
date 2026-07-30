@@ -20,6 +20,10 @@ use libc::{ENOENT, ENOTDIR};
 const ROOT_INODE: u64 = 1;
 const SNAPSHOT_DIR_INODE: u64 = 2;
 const SNAPSHOT_REFS_INODE: u64 = 3;
+const SNAPSHOT_TAG_INODE: u64 = 4;
+
+/// 60-second auto-commit interval.
+const AUTO_COMMIT_SECS: u64 = 60;
 
 #[derive(Default)]
 struct InoGen {
@@ -197,11 +201,10 @@ struct SqliteFs {
     db: rusqlite::Connection,
     entries: HashMap<u64, Entry>,
     ino_gen: InoGen,
-    /// Open file handles: (inode, fh) → dirty buffer.
     open_files: HashMap<(u64, u64), DirtyFile>,
     next_fh: u64,
-    /// Has the root tree changed since the last commit?
     dirty_root: bool,
+    last_auto_commit: std::time::Instant,
 }
 
 impl SqliteFs {
@@ -221,8 +224,18 @@ impl SqliteFs {
         entries.insert(
             SNAPSHOT_DIR_INODE,
             Entry::Dir {
-                children: HashMap::from([("refs".into(), SNAPSHOT_REFS_INODE)]),
+                children: HashMap::from([
+                    ("refs".into(), SNAPSHOT_REFS_INODE),
+                    ("tag".into(), SNAPSHOT_TAG_INODE),
+                ]),
                 parent: ROOT_INODE,
+            },
+        );
+        entries.insert(
+            SNAPSHOT_TAG_INODE,
+            Entry::Dir {
+                children: HashMap::new(),
+                parent: SNAPSHOT_DIR_INODE,
             },
         );
 
@@ -243,6 +256,7 @@ impl SqliteFs {
             open_files: HashMap::new(),
             next_fh: 0,
             dirty_root: false,
+            last_auto_commit: std::time::Instant::now(),
         })
     }
 
@@ -327,8 +341,24 @@ impl SqliteFs {
         total
     }
 
-    /// Rebuild the DAG for the root tree, create a commit, and update the snapshot view.
+    /// Auto-commit if dirty and interval elapsed. Called from every FUSE op.
+    fn maybe_auto_commit(&mut self) {
+        if !self.dirty_root {
+            return;
+        }
+        if self.last_auto_commit.elapsed().as_secs() >= AUTO_COMMIT_SECS {
+            let _ = self.commit_dirty_tree();
+            self.last_auto_commit = std::time::Instant::now();
+        }
+    }
+
+    /// Commit the dirty tree to the 'main' ref.
     fn commit_dirty_tree(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.commit_as_ref("main")
+    }
+
+    /// Create a named commit (ref) from the current dirty tree.
+    fn commit_as_ref(&mut self, ref_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Build recursive DAG from the entry tree rooted at ROOT_INODE.
         let (tree_data, tree_cid) = self.build_dir_dag(ROOT_INODE)?;
 
@@ -338,12 +368,12 @@ impl SqliteFs {
             rusqlite::params![tree_cid.to_bytes(), tree_data],
         );
 
-        // Get current commit for parent ref.
+        // Get current commit for this ref (as parent).
         let old_commit: Option<Vec<u8>> = self
             .db
             .query_row(
-                "SELECT commit_hash FROM refs WHERE name = 'main'",
-                [],
+                "SELECT commit_hash FROM refs WHERE name = ?1",
+                rusqlite::params![ref_name],
                 |r| r.get(0),
             )
             .ok();
@@ -362,8 +392,8 @@ impl SqliteFs {
             rusqlite::params![commit_cid.to_bytes(), old_commit, tree_cid.to_bytes(), now],
         );
         let _ = self.db.execute(
-            "UPDATE refs SET commit_hash = ?1 WHERE name = 'main'",
-            rusqlite::params![commit_cid.to_bytes()],
+            "INSERT OR REPLACE INTO refs (name, commit_hash) VALUES (?1, ?2)",
+            rusqlite::params![ref_name, commit_cid.to_bytes()],
         );
 
         // Rebuild snapshot tree so .sqlitefs/refs/main/ shows the new commit.
@@ -451,6 +481,7 @@ impl SqliteFs {
 
 impl fuser::Filesystem for SqliteFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        self.maybe_auto_commit();
         let Some(name_str) = name.to_str() else {
             reply.error(libc::EINVAL);
             return;
@@ -584,10 +615,46 @@ impl fuser::Filesystem for SqliteFs {
         _flags: i32,
         reply: ReplyCreate,
     ) {
+        self.maybe_auto_commit();
         let Some(name_str) = name.to_str() else {
             reply.error(libc::EINVAL);
             return;
         };
+        // Touch .sqlitefs/tag/<name> → named snapshot.
+        if parent == SNAPSHOT_TAG_INODE {
+            let _ = self.commit_as_ref(name_str);
+            // Reload snapshot tree so the new ref appears.
+            #[allow(clippy::collapsible_if)]
+            if let Ok(refs) =
+                SqliteFs::load_snapshot_tree(&self.db, &mut self.ino_gen, &mut self.entries)
+            {
+                if let Some(Entry::Dir { children, .. }) =
+                    self.entries.get_mut(&SNAPSHOT_REFS_INODE)
+                {
+                    *children = refs;
+                }
+            }
+            let ino = self.ino_gen.next();
+            self.entries.insert(
+                ino,
+                Entry::File {
+                    size: 0,
+                    manifest_cid: None,
+                    v1_2025_cid: None,
+                },
+            );
+            let fh = self.next_fh;
+            self.next_fh += 1;
+            self.open_files.insert((ino, fh), DirtyFile::default());
+            reply.created(
+                &std::time::Duration::MAX,
+                &make_attr(ino, FileType::RegularFile, 0),
+                0,
+                fh,
+                0,
+            );
+            return;
+        }
         if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
             reply.error(libc::EROFS);
             return;
@@ -625,6 +692,7 @@ impl fuser::Filesystem for SqliteFs {
     }
 
     fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+        self.maybe_auto_commit();
         if !matches!(self.entries.get(&ino), Some(Entry::File { .. })) {
             reply.error(libc::EINVAL);
             return;
@@ -1035,7 +1103,7 @@ impl fuser::Filesystem for SqliteFs {
     }
 
     fn forget(&mut self, _req: &Request, ino: u64, _nlookup: u64) {
-        if ino > SNAPSHOT_REFS_INODE {
+        if ino > SNAPSHOT_TAG_INODE {
             self.entries.remove(&ino);
         }
     }
