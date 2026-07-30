@@ -148,6 +148,7 @@ fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 fn make_attr(inode: u64, kind: FileType, size: u64) -> FileAttr {
     let (perm, nlink) = match kind {
         FileType::Directory => (0o755, 2),
+        FileType::Symlink => (0o777, 1),
         _ => (0o644, 1),
     };
     FileAttr {
@@ -180,6 +181,9 @@ enum Entry {
         manifest_cid: Option<Vec<u8>>,
         /// v1-2025 root CID (IPFS-compatible).
         v1_2025_cid: Option<Vec<u8>>,
+    },
+    Symlink {
+        target: String,
     },
 }
 
@@ -411,6 +415,10 @@ impl SqliteFs {
                     // ponytail: file was created but never written to; skip.
                     continue;
                 }
+                Some(Entry::Symlink { .. }) => {
+                    // ponytail: symlinks not committed into DAG yet.
+                    continue;
+                }
                 None => continue,
             };
             links.push((name.clone(), child_cid));
@@ -458,6 +466,7 @@ impl fuser::Filesystem for SqliteFs {
             };
             let (kind, size) = match child {
                 Entry::Dir { .. } => (FileType::Directory, 0),
+                Entry::Symlink { .. } => (FileType::Symlink, 0),
                 Entry::File { size, .. } => (FileType::RegularFile, *size),
             };
             reply.entry(
@@ -477,6 +486,7 @@ impl fuser::Filesystem for SqliteFs {
         };
         let (kind, size) = match entry {
             Entry::Dir { .. } => (FileType::Directory, 0),
+            Entry::Symlink { .. } => (FileType::Symlink, 0),
             Entry::File { size, .. } => (FileType::RegularFile, *size),
         };
         reply.attr(&std::time::Duration::MAX, &make_attr(ino, kind, size));
@@ -833,6 +843,126 @@ impl fuser::Filesystem for SqliteFs {
         reply.data(&[]);
     }
 
+    fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
+        let Some(Entry::Symlink { target }) = self.entries.get(&ino) else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        reply.data(target.as_bytes());
+    }
+
+    fn symlink(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        link: &std::path::Path,
+        reply: ReplyEntry,
+    ) {
+        let Some(name_str) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        let Some(target_str) = link.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+            reply.error(libc::EROFS);
+            return;
+        }
+        let Some(Entry::Dir { children, .. }) = self.entries.get_mut(&parent) else {
+            reply.error(ENOTDIR);
+            return;
+        };
+        if children.contains_key(name_str) {
+            reply.error(libc::EEXIST);
+            return;
+        }
+        let ino = self.ino_gen.next();
+        children.insert(name_str.to_string(), ino);
+        self.entries.insert(
+            ino,
+            Entry::Symlink {
+                target: target_str.to_string(),
+            },
+        );
+        self.dirty_root = true;
+        if self.dirty_root {
+            let _ = self.commit_dirty_tree();
+        }
+        reply.entry(
+            &std::time::Duration::MAX,
+            &make_attr(ino, FileType::Symlink, 0),
+            0,
+        );
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        let Some(name_str) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        let Some(newname_str) = newname.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        if parent == SNAPSHOT_DIR_INODE
+            || parent == SNAPSHOT_REFS_INODE
+            || newparent == SNAPSHOT_DIR_INODE
+            || newparent == SNAPSHOT_REFS_INODE
+        {
+            reply.error(libc::EROFS);
+            return;
+        }
+        // Remove inode from old parent.
+        let ino = {
+            let Some(Entry::Dir { children, .. }) = self.entries.get_mut(&parent) else {
+                reply.error(ENOTDIR);
+                return;
+            };
+            let Some(&ino) = children.get(name_str) else {
+                reply.error(ENOENT);
+                return;
+            };
+            children.remove(name_str);
+            ino
+        };
+        // Add to new parent (overwrite target if it exists).
+        let Some(Entry::Dir { children, .. }) = self.entries.get_mut(&newparent) else {
+            // Re-insert into old parent if destination doesn't exist.
+            let Some(Entry::Dir { children, .. }) = self.entries.get_mut(&parent) else {
+                reply.error(ENOTDIR);
+                return;
+            };
+            children.insert(name_str.to_string(), ino);
+            reply.error(ENOTDIR);
+            return;
+        };
+        let old = children.insert(newname_str.to_string(), ino);
+        if let Some(old_ino) = old {
+            self.entries.remove(&old_ino);
+        }
+        // Update parent pointer if it's a directory.
+        if let Some(Entry::Dir { parent: p, .. }) = self.entries.get_mut(&ino) {
+            *p = newparent;
+        }
+        self.dirty_root = true;
+        if self.dirty_root {
+            let _ = self.commit_dirty_tree();
+        }
+        reply.ok();
+    }
+
     fn readdir(
         &mut self,
         _req: &Request,
@@ -856,6 +986,7 @@ impl fuser::Filesystem for SqliteFs {
                 .map(|(name, &child_ino)| {
                     let kind = match &self.entries[&child_ino] {
                         Entry::Dir { .. } => FileType::Directory,
+                        Entry::Symlink { .. } => FileType::Symlink,
                         Entry::File { .. } => FileType::RegularFile,
                     };
                     (child_ino, kind, name.as_str())
@@ -867,6 +998,7 @@ impl fuser::Filesystem for SqliteFs {
                 .map(|(name, &child_ino)| {
                     let kind = match &self.entries[&child_ino] {
                         Entry::Dir { .. } => FileType::Directory,
+                        Entry::Symlink { .. } => FileType::Symlink,
                         Entry::File { .. } => FileType::RegularFile,
                     };
                     (child_ino, kind, name.as_str())

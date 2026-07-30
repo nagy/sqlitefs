@@ -13,6 +13,7 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 ├── shell.nix            # Nix dev shell
 ├── default.nix          # Nix build
 ├── .gitignore
+├── LICENSE              # AGPL-3.0
 ├── src/
 │   ├── main.rs          # CLI (init + mount), writable FUSE + read-only .sqlitefs/
 │   ├── dag.rs           # CIDv1, dag-pb, dag-cbor, v1-2025 UnixFS DAG builder

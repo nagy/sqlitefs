@@ -6,14 +6,26 @@
   fuse3 ? pkgs.fuse3,
   sqlite ? pkgs.sqlite,
 }:
+
 rustPlatform.buildRustPackage {
   pname = "sqlitefs";
   version = "0.1.0";
+
   src = lib.cleanSource ./.;
-  cargoLock = { lockFile = ./Cargo.lock; };
+
+  cargoLock = {
+    lockFile = ./Cargo.lock;
+  };
+
   strictDeps = true;
+
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [ fuse3 sqlite ];
+
+  buildInputs = [
+    fuse3
+    sqlite
+  ];
+
   meta = {
     description = "Versioned content-addressed filesystem in a single SQLite file";
     license = lib.licenses.agpl3Plus;
