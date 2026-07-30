@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+fastcdc = "4"
 fuser = "0.15"
 libc = "0.2"
 rusqlite = "0.31"

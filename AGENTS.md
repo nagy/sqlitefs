@@ -14,8 +14,9 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 ├── default.nix          # Nix build
 ├── .gitignore
 ├── src/
-│   ├── main.rs          # CLI (init + mount subcommands), FUSE filesystem (read-only)
-│   └── dag.rs           # CIDv1, dag-pb, dag-cbor — manual IPLD DAG construction
+│   ├── main.rs          # CLI (init + mount), writable FUSE + read-only .sqlitefs/
+│   ├── dag.rs           # CIDv1, dag-pb, dag-cbor — manual IPLD DAG construction
+│   └── cdc.rs           # Content-defined chunking via FastCDC v2020 + SHA-256
 └── docs/
     └── adr/             # Architectural Decision Records
         ├── 0001-sqlite-canonical-store.md
@@ -36,8 +37,8 @@ See `docs/adr/` for the full record. Summary:
 ## Tooling
 
 - **Language**: Rust
-- **Key crates (current)**: `clap` (CLI), `rusqlite` (SQLite), `fuser` (FUSE), `libc` (errnos), `sha2` (SHA-256)
-- **Key crates (planned)**: fastcdc/rapidcdc (content-defined chunking)
+- **Key crates (current)**: `clap` (CLI), `rusqlite` (SQLite), `fuser` (FUSE), `libc` (errnos), `sha2` (SHA-256), `fastcdc` (CDC chunking)
+- **Key crates (planned)**: none pending
 - **Chunking**: FastCDC (pluggable — may evaluate alternatives like rapidCDC later)
 - **UnixFS v1-2025**: custom DAG builder (no existing mature Rust impl — implement against spec, validate against ipfs-chainer reference)
 

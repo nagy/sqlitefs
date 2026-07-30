@@ -1,4 +1,4 @@
-#[allow(dead_code)]
+mod cdc;
 mod dag;
 
 use std::collections::HashMap;
@@ -8,12 +8,13 @@ use std::time::UNIX_EPOCH;
 
 use clap::{Parser, Subcommand};
 use fuser::{
-    FileAttr, FileType, MountOption, ReplyAttr, ReplyDirectory, ReplyEntry, ReplyXattr, Request,
+    FileAttr, FileType, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyWrite, ReplyXattr, Request,
 };
 use libc::{ENOENT, ENOTDIR};
 
 // ---------------------------------------------------------------------------
-// Inode allocator — tiny, just counts up from 2 (1 = root)
+// Inode allocator
 // ---------------------------------------------------------------------------
 
 const ROOT_INODE: u64 = 1;
@@ -53,9 +54,7 @@ enum Command {
     Init { path: PathBuf },
     /// Mount a repository via FUSE.
     Mount {
-        /// Path to the .db file.
         db_path: PathBuf,
-        /// Mount point.
         mount_point: PathBuf,
     },
 }
@@ -104,14 +103,12 @@ fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         ",
     )?;
 
-    // Create the empty root tree (UnixFS dag-pb directory).
     let (empty_tree_data, empty_tree_cid) = dag::empty_dir();
     db.execute(
         "INSERT INTO chunks (hash, data) VALUES (?1, ?2)",
         rusqlite::params![empty_tree_cid.to_bytes(), empty_tree_data],
     )?;
 
-    // Create the initial commit (no parent).
     let now = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -126,7 +123,6 @@ fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         rusqlite::params![commit_cid.to_bytes(), empty_tree_cid.to_bytes(), now],
     )?;
 
-    // Set main ref to the initial commit.
     db.execute(
         "INSERT INTO refs (name, commit_hash) VALUES ('main', ?1)",
         rusqlite::params![commit_cid.to_bytes()],
@@ -152,8 +148,8 @@ fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 #[allow(dead_code)]
 fn make_attr(inode: u64, kind: FileType, size: u64) -> FileAttr {
     let (perm, nlink) = match kind {
-        FileType::Directory => (0o555, 2),
-        _ => (0o444, 1),
+        FileType::Directory => (0o755, 2),
+        _ => (0o644, 1),
     };
     FileAttr {
         ino: inode,
@@ -166,96 +162,116 @@ fn make_attr(inode: u64, kind: FileType, size: u64) -> FileAttr {
         kind,
         perm,
         nlink,
-        uid: 0,
-        gid: 0,
+        uid: unsafe { libc::getuid() },
+        gid: unsafe { libc::getgid() },
         rdev: 0,
         flags: 0,
         blksize: 512,
     }
 }
 
-#[allow(dead_code)]
 enum Entry {
-    Dir { children: HashMap<String, u64> },
-    File { cid: Vec<u8>, size: u64 },
+    Dir {
+        children: HashMap<String, u64>,
+        parent: u64,
+    },
+    File {
+        size: u64,
+    },
 }
 
-#[allow(dead_code)]
+/// In-memory dirty file buffer, accumulated on writes, flushed to CDC chunks on release.
+struct DirtyFile {
+    data: Vec<u8>,
+}
+
 struct SqliteFs {
     db: rusqlite::Connection,
     entries: HashMap<u64, Entry>,
     ino_gen: InoGen,
+    /// Open file handles: (inode, fh) → dirty buffer.
+    open_files: HashMap<(u64, u64), DirtyFile>,
+    next_fh: u64,
 }
 
 impl SqliteFs {
     fn open(db_path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let db = rusqlite::Connection::open(db_path)?;
         let mut ino_gen = InoGen::new(SNAPSHOT_REFS_INODE + 1);
-
-        // Build the snapshot dir tree in-memory.
-        let ref_names: Vec<(String, Vec<u8>)> = db
-            .prepare("SELECT name, commit_hash FROM refs")?
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
         let mut entries = HashMap::new();
 
-        let mut refs_children = HashMap::new();
-        for (name, commit_hash) in ref_names {
-            // Look up the tree CID for this commit.
-            let tree_cid: Vec<u8> = db.query_row(
-                "SELECT tree_cid FROM commits WHERE hash = ?1",
-                rusqlite::params![commit_hash],
-                |row| row.get(0),
-            )?;
-
-            // Build directory listing from directory_index.
-            let mut stmt =
-                db.prepare("SELECT name, child_cid FROM directory_index WHERE parent_cid = ?1")?;
-            let children: HashMap<String, u64> = stmt
-                .query_map(rusqlite::params![tree_cid], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .filter_map(|r| r.ok())
-                .map(|(child_name, child_cid)| {
-                    let ino = ino_gen.next();
-                    // ponytail: entries are directories for now; files need
-                    // DAG resolution to determine type + size.
-                    entries.insert(
-                        ino,
-                        Entry::File {
-                            cid: child_cid,
-                            size: 0,
-                        },
-                    );
-                    (child_name, ino)
-                })
-                .collect();
-
-            let ref_ino = ino_gen.next();
-            entries.insert(ref_ino, Entry::Dir { children });
-            refs_children.insert(name, ref_ino);
-        }
-
+        // Wire up root directory (writable) + .sqlitefs/ (read-only snapshot tree).
         entries.insert(
             ROOT_INODE,
             Entry::Dir {
                 children: HashMap::from([(".sqlitefs".into(), SNAPSHOT_DIR_INODE)]),
+                parent: ROOT_INODE,
             },
         );
         entries.insert(
             SNAPSHOT_DIR_INODE,
             Entry::Dir {
                 children: HashMap::from([("refs".into(), SNAPSHOT_REFS_INODE)]),
+                parent: ROOT_INODE,
             },
         );
+
+        // Build snapshot ref tree from DB.
+        let mut refs_children = HashMap::new();
+        if let Ok(mut stmt) = db.prepare("SELECT name, commit_hash FROM refs") {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    let (name, commit_hash) = row;
+                    let tree_cid: Option<Vec<u8>> = db
+                        .query_row(
+                            "SELECT tree_cid FROM commits WHERE hash = ?1",
+                            rusqlite::params![commit_hash],
+                            |r| r.get(0),
+                        )
+                        .ok();
+
+                    let mut dir_children = HashMap::new();
+                    if let Some(ref tc) = tree_cid {
+                        if let Ok(mut cs) = db.prepare(
+                            "SELECT name, child_cid FROM directory_index WHERE parent_cid = ?1",
+                        ) {
+                            if let Ok(rows) = cs.query_map(rusqlite::params![tc], |r| {
+                                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                            }) {
+                                for cr in rows.flatten() {
+                                    let ino = ino_gen.next();
+                                    entries.insert(
+                                        ino,
+                                        Entry::File {
+                                            // ponytail: size from DAG would need UnixFS decoding
+                                            size: 0,
+                                        },
+                                    );
+                                    dir_children.insert(cr.0, ino);
+                                }
+                            }
+                        }
+                    }
+                    let ref_ino = ino_gen.next();
+                    entries.insert(
+                        ref_ino,
+                        Entry::Dir {
+                            children: dir_children,
+                            parent: SNAPSHOT_REFS_INODE,
+                        },
+                    );
+                    refs_children.insert(name, ref_ino);
+                }
+            }
+        }
+
         entries.insert(
             SNAPSHOT_REFS_INODE,
             Entry::Dir {
                 children: refs_children,
+                parent: SNAPSHOT_DIR_INODE,
             },
         );
 
@@ -263,17 +279,14 @@ impl SqliteFs {
             db,
             entries,
             ino_gen,
+            open_files: HashMap::new(),
+            next_fh: 0,
         })
-    }
-
-    #[allow(dead_code)]
-    fn entry(&self, inode: u64) -> Option<&Entry> {
-        self.entries.get(&inode)
     }
 }
 
 // ---------------------------------------------------------------------------
-// FUSE trait impl
+// FUSE trait impl — writable root + read-only .sqlitefs/
 // ---------------------------------------------------------------------------
 
 impl fuser::Filesystem for SqliteFs {
@@ -283,7 +296,7 @@ impl fuser::Filesystem for SqliteFs {
             return;
         };
 
-        let Some(Entry::Dir { children }) = self.entries.get(&parent) else {
+        let Some(Entry::Dir { children, .. }) = self.entries.get(&parent) else {
             reply.error(ENOTDIR);
             return;
         };
@@ -319,27 +332,262 @@ impl fuser::Filesystem for SqliteFs {
         reply.attr(&std::time::Duration::MAX, &make_attr(ino, kind, size));
     }
 
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let Some(name_str) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        // ponytail: no mkdir in .sqlitefs/ snapshot tree.
+        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+            reply.error(libc::EROFS);
+            return;
+        }
+        let Some(Entry::Dir { children, .. }) = self.entries.get_mut(&parent) else {
+            reply.error(ENOTDIR);
+            return;
+        };
+        if children.contains_key(name_str) {
+            reply.error(libc::EEXIST);
+            return;
+        }
+        let ino = self.ino_gen.next();
+        children.insert(name_str.to_string(), ino);
+        self.entries.insert(
+            ino,
+            Entry::Dir {
+                children: HashMap::new(),
+                parent,
+            },
+        );
+        reply.entry(
+            &std::time::Duration::MAX,
+            &make_attr(ino, FileType::Directory, 0),
+            0,
+        );
+    }
+
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(name_str) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        // ponytail: no rmdir in .sqlitefs/ snapshot tree.
+        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+            reply.error(libc::EROFS);
+            return;
+        }
+        // Extract ino from children first (mutable borrow released immediately).
+        let ino = {
+            let Some(Entry::Dir { children, .. }) = self.entries.get(&parent) else {
+                reply.error(ENOTDIR);
+                return;
+            };
+            let Some(&ino) = children.get(name_str) else {
+                reply.error(ENOENT);
+                return;
+            };
+            ino
+        };
+        let is_empty = match self.entries.get(&ino) {
+            Some(Entry::Dir { children, .. }) => children.is_empty(),
+            _ => {
+                reply.error(ENOTDIR);
+                return;
+            }
+        };
+        if !is_empty {
+            reply.error(libc::ENOTEMPTY);
+            return;
+        }
+        let Some(Entry::Dir { children, .. }) = self.entries.get_mut(&parent) else {
+            reply.error(ENOTDIR);
+            return;
+        };
+        children.remove(name_str);
+        self.entries.remove(&ino);
+        reply.ok();
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let Some(name_str) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        // ponytail: no create in snapshot tree.
+        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+            reply.error(libc::EROFS);
+            return;
+        }
+        let Some(Entry::Dir { children, .. }) = self.entries.get_mut(&parent) else {
+            reply.error(ENOTDIR);
+            return;
+        };
+        if children.contains_key(name_str) {
+            reply.error(libc::EEXIST);
+            return;
+        }
+        let ino = self.ino_gen.next();
+        children.insert(name_str.to_string(), ino);
+        self.entries.insert(ino, Entry::File { size: 0 });
+
+        let fh = self.next_fh;
+        self.next_fh += 1;
+        self.open_files
+            .insert((ino, fh), DirtyFile { data: Vec::new() });
+
+        reply.created(
+            &std::time::Duration::MAX,
+            &make_attr(ino, FileType::RegularFile, 0),
+            0,
+            fh,
+            0,
+        );
+    }
+
+    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+        if !matches!(self.entries.get(&ino), Some(Entry::File { .. })) {
+            reply.error(libc::EINVAL);
+            return;
+        }
+        let fh = self.next_fh;
+        self.next_fh += 1;
+        self.open_files
+            .insert((ino, fh), DirtyFile { data: Vec::new() });
+        reply.opened(fh, 0);
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        let Some(df) = self.open_files.get_mut(&(ino, fh)) else {
+            reply.error(libc::EBADF);
+            return;
+        };
+        let off = offset as usize;
+        let end = off + data.len();
+        if end > df.data.len() {
+            df.data.resize(end, 0);
+        }
+        df.data[off..end].copy_from_slice(data);
+        // Update file size.
+        if let Some(Entry::File { size }) = self.entries.get_mut(&ino) {
+            *size = df.data.len() as u64;
+        }
+        reply.written(data.len() as u32);
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        if let Some(df) = self.open_files.remove(&(ino, fh)) {
+            if !df.data.is_empty() {
+                // CDC chunk and insert into DB.
+                let chunks = cdc::chunk_file(&df.data);
+                for (hash, chunk_data) in chunks {
+                    // Only insert if not already present (dedup).
+                    let _ = self.db.execute(
+                        "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+                        rusqlite::params![hash.to_vec(), chunk_data],
+                    );
+                }
+                // ponytail: no commit created yet, no directory_index updated.
+                // Data is in the chunk store but unreachable until a commit is made.
+            }
+        }
+        reply.ok();
+    }
+
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(name_str) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+            reply.error(libc::EROFS);
+            return;
+        }
+        // Extract ino first, then check type.
+        let ino = {
+            let Some(Entry::Dir { children, .. }) = self.entries.get(&parent) else {
+                reply.error(ENOTDIR);
+                return;
+            };
+            let Some(&ino) = children.get(name_str) else {
+                reply.error(ENOENT);
+                return;
+            };
+            ino
+        };
+        if matches!(self.entries.get(&ino), Some(Entry::Dir { .. })) {
+            reply.error(libc::EISDIR);
+            return;
+        }
+        let Some(Entry::Dir { children, .. }) = self.entries.get_mut(&parent) else {
+            reply.error(ENOTDIR);
+            return;
+        };
+        children.remove(name_str);
+        self.entries.remove(&ino);
+        reply.ok();
+    }
+
     fn read(
         &mut self,
         _req: &Request,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         _size: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
-        reply: fuser::ReplyData,
+        reply: ReplyData,
     ) {
-        let Some(Entry::File { size, .. }) = self.entries.get(&ino) else {
-            reply.error(libc::EINVAL);
-            return;
-        };
-        if offset >= *size as i64 {
+        // Read from dirty buffer if open, otherwise from committed state.
+        // ponytail: committed-state reads not wired yet (needs file chunk manifest).
+        if let Some(df) = self.open_files.get(&(ino, fh)) {
+            let off = offset as usize;
+            if off >= df.data.len() {
+                reply.data(&[]);
+                return;
+            }
+            reply.data(&df.data[off..]);
+        } else {
+            // ponytail: committed file reads from DAG not wired yet.
             reply.data(&[]);
-            return;
         }
-        // File content lives in the DAG / chunk store — not wired up yet.
-        reply.data(&[]);
     }
 
     fn readdir(
@@ -350,25 +598,18 @@ impl fuser::Filesystem for SqliteFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let Some(Entry::Dir { children }) = self.entries.get(&ino) else {
+        let Some(Entry::Dir { children, parent }) = self.entries.get(&ino) else {
             reply.error(ENOTDIR);
             return;
         };
 
-        // Determine parent inode for ".."
-        let parent = match ino {
-            ROOT_INODE | SNAPSHOT_DIR_INODE => ROOT_INODE,
-            SNAPSHOT_REFS_INODE => SNAPSHOT_DIR_INODE,
-            _ => ROOT_INODE, // ponytail: child entries don't know their parent yet
-        };
-
         let mut entries: Vec<(u64, FileType, &str)> = vec![
             (ino, FileType::Directory, "."),
-            (parent, FileType::Directory, ".."),
+            (*parent, FileType::Directory, ".."),
         ];
 
-        // Root: hide .sqlitefs/ from readdir but it's accessible by path.
-        let visible = if ino == ROOT_INODE {
+        // Root: hide .sqlitefs/ from readdir.
+        let visible: Vec<_> = if ino == ROOT_INODE {
             children
                 .iter()
                 .filter(|(name, _)| *name != ".sqlitefs")
@@ -379,7 +620,7 @@ impl fuser::Filesystem for SqliteFs {
                     };
                     (child_ino, kind, name.as_str())
                 })
-                .collect::<Vec<_>>()
+                .collect()
         } else {
             children
                 .iter()
@@ -422,6 +663,13 @@ impl fuser::Filesystem for SqliteFs {
     fn listxattr(&mut self, _req: &Request, _ino: u64, _size: u32, reply: ReplyXattr) {
         reply.data(b"");
     }
+
+    fn forget(&mut self, _req: &Request, ino: u64, _nlookup: u64) {
+        // Only forget non-root, non-snapshot inodes.
+        if ino > SNAPSHOT_REFS_INODE {
+            self.entries.remove(&ino);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +682,6 @@ fn mount_fs(db_path: &PathBuf, mount_point: &PathBuf) -> Result<(), Box<dyn std:
         fs,
         mount_point,
         &[
-            MountOption::RO,
             MountOption::FSName("sqlitefs".into()),
             MountOption::AutoUnmount,
             MountOption::AllowRoot,
