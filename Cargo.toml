@@ -1,0 +1,12 @@
+[package]
+name = "sqlitefs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rusqlite = "0.31"
+
+[[bin]]
+name = "sqlitefs"
+path = "src/main.rs"

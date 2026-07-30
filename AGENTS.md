@@ -8,6 +8,13 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 .
 ├── CONTEXT.md           # Ubiquitous language / glossary
 ├── AGENTS.md            # This file
+├── Cargo.toml
+├── Cargo.lock
+├── shell.nix            # Nix dev shell
+├── default.nix          # Nix build
+├── .gitignore
+├── src/
+│   └── main.rs          # CLI + init subcommand
 └── docs/
     └── adr/             # Architectural Decision Records
         ├── 0001-sqlite-canonical-store.md
@@ -28,7 +35,8 @@ See `docs/adr/` for the full record. Summary:
 ## Tooling
 
 - **Language**: Rust
-- **Key crates**: `cid`, `multihash`, `blake3`, `libipld`/`ipld-dagpb`, `serde_ipld_dagcbor`, `rusqlite` (C bindings), `fuser` (FUSE)
+- **Key crates (current)**: `clap` (CLI), `rusqlite` (SQLite via C bindings)
+- **Key crates (planned)**: `cid`, `multihash`, `blake3`, `libipld`/`ipld-dagpb`, `serde_ipld_dagcbor`, `fuser` (FUSE)
 - **Chunking**: FastCDC (pluggable — may evaluate alternatives like rapidCDC later)
 - **UnixFS v1-2025**: custom DAG builder (no existing mature Rust impl — implement against spec, validate against ipfs-chainer reference)
 
