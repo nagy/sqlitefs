@@ -37,6 +37,7 @@ See `docs/adr/` for the full record. Summary:
 
 ## Tooling
 
+- **Build**: `nix-shell --run "cargo build"` (also `cargo fmt`, `cargo clippy`)
 - **Language**: Rust
 - **Key crates (current)**: `clap` (CLI), `rusqlite` (SQLite), `fuser` (FUSE), `libc` (errnos), `sha2` (SHA-256), `fastcdc` (CDC chunking)
 - **Key crates (planned)**: none pending
@@ -48,7 +49,7 @@ See `docs/adr/` for the full record. Summary:
 | Operation | Status |
 |-----------|--------|
 | `lookup`, `getattr`, `readdir` | ✓ |
-| `mkdir`, `rmdir` | ✓ (with auto-commit) |
+| `mkdir`, `rmdir` | ✓ (auto-commit on completion) |
 | `create`, `open`, `write`, `release`, `read` | ✓ (CDC + commit on release) |
 | `unlink` | ✓ (with auto-commit) |
 | `rename` | ✓ (cross-directory, overwrite, auto-commit) |
@@ -71,7 +72,7 @@ See `docs/adr/` for the full record. Summary:
 - **`setattr`** — truncate, chmod, utimes
 - **GC** — delete unreachable chunks, user-initiated VACUUM
 - **Symlinks in DAG** — currently not persisted in commits (marked as ponytail skip)
-- **Recursive snapshot tree refresh on `rename`/`rmdir`/`mkdir`** — only `commit_as_ref` refreshes
+- **Recursive snapshot tree refresh on `rename`/`rmdir`/`mkdir`** — ✓ (auto-commit rebuilds snapshot tree)
 - **NixOS VM test** — like nixfs has
 - **v1-2025 CID interop validation** — compare against ipfs-chainer / Kubo output
 
@@ -83,4 +84,5 @@ When working on this repo, agents MUST:
 2. **Use Rust idioms from the user's conventions** — see the `rust-idioms` skill.
 3. **Do not add dependencies lightly** — run through the ponytail filter first. Prefer stdlib, minimal crates.
 4. **Treat `cargo fmt` as mandatory** before every commit.
-5. **Git commits without GPG signing** — use `--no-gpg-sign`.
+5. **Build with `nix-shell --run "cargo build"`** — `cargo fmt && cargo clippy` too.
+6. **Git commits without GPG signing** — use `--no-gpg-sign`.

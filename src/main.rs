@@ -558,6 +558,9 @@ impl fuser::Filesystem for SqliteFs {
             },
         );
         self.dirty_root = true;
+        if self.dirty_root {
+            let _ = self.commit_dirty_tree();
+        }
         reply.entry(
             &std::time::Duration::MAX,
             &make_attr(ino, FileType::Directory, 0),
@@ -602,6 +605,9 @@ impl fuser::Filesystem for SqliteFs {
         children.remove(name_str);
         self.entries.remove(&ino);
         self.dirty_root = true;
+        if self.dirty_root {
+            let _ = self.commit_dirty_tree();
+        }
         reply.ok();
     }
 
