@@ -21,7 +21,7 @@ The root directory of a commit — a UnixFS dag-pb directory node. All filesyste
 _Avoid_: Root, filesystem root
 
 **Physical chunk**:
-A variable-size byte segment produced by FastCDC (or another content-defined chunking algorithm). Stored once in the chunk store, addressed by its BLAKE3 hash. The deduplication unit.
+A variable-size byte segment produced by FastCDC (or another content-defined chunking algorithm). Stored once in the chunk store, addressed by its SHA-256 hash. The deduplication unit.
 _Avoid_: Raw block, data segment, slice
 
 **Virtual block**:
@@ -33,7 +33,7 @@ SQLite table mapping virtual block CIDs to backing physical chunks. Rebuildable 
 _Avoid_: CID mapping table
 
 **Chunk store**:
-The set of all physical chunks stored in SQLite, indexed by BLAKE3 hash. The foundation of truth — if all other tables are lost, the full filesystem tree can be reconstructed by walking the DAG from commit root CIDs.
+The set of all physical chunks stored in SQLite, indexed by SHA-256 hash. The foundation of truth — if all other tables are lost, the full filesystem tree can be reconstructed by walking the DAG from commit root CIDs.
 _Avoid_: Blob store, CAS
 
 **Directory index**:

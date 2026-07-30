@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod dag;
+
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -101,7 +104,44 @@ fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         ",
     )?;
 
-    println!("Created empty repository at {}", path.display());
+    // Create the empty root tree (UnixFS dag-pb directory).
+    let (empty_tree_data, empty_tree_cid) = dag::empty_dir();
+    db.execute(
+        "INSERT INTO chunks (hash, data) VALUES (?1, ?2)",
+        rusqlite::params![empty_tree_cid.to_bytes(), empty_tree_data],
+    )?;
+
+    // Create the initial commit (no parent).
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (commit_data, commit_cid) = dag::encode_commit(None, &empty_tree_cid.to_bytes(), now);
+    db.execute(
+        "INSERT INTO chunks (hash, data) VALUES (?1, ?2)",
+        rusqlite::params![commit_cid.to_bytes(), commit_data],
+    )?;
+    db.execute(
+        "INSERT INTO commits (hash, parent, tree_cid, timestamp) VALUES (?1, NULL, ?2, ?3)",
+        rusqlite::params![commit_cid.to_bytes(), empty_tree_cid.to_bytes(), now],
+    )?;
+
+    // Set main ref to the initial commit.
+    db.execute(
+        "INSERT INTO refs (name, commit_hash) VALUES ('main', ?1)",
+        rusqlite::params![commit_cid.to_bytes()],
+    )?;
+
+    let hash_hex: String = commit_cid
+        .hash_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    println!(
+        "Created repository at {} (commit {})",
+        path.display(),
+        &hash_hex[..8]
+    );
     Ok(())
 }
 
@@ -109,6 +149,7 @@ fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 // FUSE filesystem
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn make_attr(inode: u64, kind: FileType, size: u64) -> FileAttr {
     let (perm, nlink) = match kind {
         FileType::Directory => (0o555, 2),
@@ -152,26 +193,51 @@ impl SqliteFs {
         let mut ino_gen = InoGen::new(SNAPSHOT_REFS_INODE + 1);
 
         // Build the snapshot dir tree in-memory.
-        let ref_names: Vec<String> = db
-            .prepare("SELECT name FROM refs")?
-            .query_map([], |row| row.get::<_, String>(0))?
+        let ref_names: Vec<(String, Vec<u8>)> = db
+            .prepare("SELECT name, commit_hash FROM refs")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
             .filter_map(|r| r.ok())
             .collect();
 
         let mut entries = HashMap::new();
 
-        // ponytail: ref dirs are empty shells for now; resolving actual
-        // commit trees needs the DAG layer.
         let mut refs_children = HashMap::new();
-        for name in ref_names {
-            let ino = ino_gen.next();
-            entries.insert(
-                ino,
-                Entry::Dir {
-                    children: HashMap::new(),
-                },
-            );
-            refs_children.insert(name, ino);
+        for (name, commit_hash) in ref_names {
+            // Look up the tree CID for this commit.
+            let tree_cid: Vec<u8> = db.query_row(
+                "SELECT tree_cid FROM commits WHERE hash = ?1",
+                rusqlite::params![commit_hash],
+                |row| row.get(0),
+            )?;
+
+            // Build directory listing from directory_index.
+            let mut stmt =
+                db.prepare("SELECT name, child_cid FROM directory_index WHERE parent_cid = ?1")?;
+            let children: HashMap<String, u64> = stmt
+                .query_map(rusqlite::params![tree_cid], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })?
+                .filter_map(|r| r.ok())
+                .map(|(child_name, child_cid)| {
+                    let ino = ino_gen.next();
+                    // ponytail: entries are directories for now; files need
+                    // DAG resolution to determine type + size.
+                    entries.insert(
+                        ino,
+                        Entry::File {
+                            cid: child_cid,
+                            size: 0,
+                        },
+                    );
+                    (child_name, ino)
+                })
+                .collect();
+
+            let ref_ino = ino_gen.next();
+            entries.insert(ref_ino, Entry::Dir { children });
+            refs_children.insert(name, ref_ino);
         }
 
         entries.insert(

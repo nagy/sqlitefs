@@ -8,6 +8,7 @@ clap = { version = "4", features = ["derive"] }
 fuser = "0.15"
 libc = "0.2"
 rusqlite = "0.31"
+sha2 = "0.10"
 
 [[bin]]
 name = "sqlitefs"
