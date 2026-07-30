@@ -116,7 +116,7 @@ const WIRE_VARINT: u8 = 0;
 const WIRE_LEN: u8 = 2;
 
 fn pb_tag(field: u64, wire: u8) -> u64 {
-    (field << 3) | wire as u64
+    (field << 3) | u64::from(wire)
 }
 
 /// Encode a PBNode: Data (field 1, bytes) + Links (field 2, repeated message)

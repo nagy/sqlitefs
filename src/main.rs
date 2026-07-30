@@ -252,7 +252,7 @@ impl SqliteFs {
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(Result::ok)
             .collect();
         for (name, commit_hash) in rows {
             let tree_cid: Vec<u8> = db.query_row(
@@ -267,7 +267,7 @@ impl SqliteFs {
                 .query_map(rusqlite::params![tree_cid], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
                 })?
-                .filter_map(|r| r.ok())
+                .filter_map(Result::ok)
                 .collect();
             for (child_name, child_cid) in child_rows {
                 let ino = ino_gen.next();
@@ -539,12 +539,11 @@ impl fuser::Filesystem for SqliteFs {
             };
             ino
         };
-        let is_empty = match self.entries.get(&ino) {
-            Some(Entry::Dir { children, .. }) => children.is_empty(),
-            _ => {
-                reply.error(ENOTDIR);
-                return;
-            }
+        let is_empty = if let Some(Entry::Dir { children, .. }) = self.entries.get(&ino) {
+            children.is_empty()
+        } else {
+            reply.error(ENOTDIR);
+            return;
         };
         if !is_empty {
             reply.error(libc::ENOTEMPTY);
@@ -756,16 +755,13 @@ impl fuser::Filesystem for SqliteFs {
                 reply.data(&[]);
                 return;
             }
-            let manifest_data = match self.db.query_row(
+            let Ok(manifest_data) = self.db.query_row(
                 "SELECT data FROM chunks WHERE hash = ?1",
                 rusqlite::params![cid],
                 |r| r.get::<_, Vec<u8>>(0),
-            ) {
-                Ok(d) => d,
-                Err(_) => {
-                    reply.data(&[]);
-                    return;
-                }
+            ) else {
+                reply.data(&[]);
+                return;
             };
             if let Some(hashes) = dag::decode_file_manifest(&manifest_data) {
                 let mut assembled = Vec::new();
