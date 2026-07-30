@@ -68,7 +68,7 @@ See `docs/adr/` for the full record. Summary:
 
 ## Remaining work
 
-- **`.sqlitefs/c/<hash-prefix>/`** — direct commit access by hash
+- **`.sqlitefs/c/<hash-prefix>/`** — ✓ (prefix lookup in commits table, cached)
 - **`setattr`** — ~~truncate-to-zero~~ ✓ | chmod, utimes — still not implemented
 - **GC** — delete unreachable chunks, user-initiated VACUUM
 - **Symlinks in DAG** — currently not persisted in commits (marked as ponytail skip)

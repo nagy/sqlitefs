@@ -21,6 +21,7 @@ const ROOT_INODE: u64 = 1;
 const SNAPSHOT_DIR_INODE: u64 = 2;
 const SNAPSHOT_REFS_INODE: u64 = 3;
 const SNAPSHOT_TAG_INODE: u64 = 4;
+const SNAPSHOT_HASH_INODE: u64 = 5;
 
 /// 60-second auto-commit interval.
 const AUTO_COMMIT_SECS: u64 = 60;
@@ -210,7 +211,7 @@ struct SqliteFs {
 impl SqliteFs {
     fn open(db_path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let db = rusqlite::Connection::open(db_path)?;
-        let mut ino_gen = InoGen::new(SNAPSHOT_REFS_INODE + 1);
+        let mut ino_gen = InoGen::new(SNAPSHOT_HASH_INODE + 1);
         let mut entries = HashMap::new();
 
         // Wire up root directory (writable) + .sqlitefs/ (read-only snapshot tree).
@@ -227,12 +228,20 @@ impl SqliteFs {
                 children: HashMap::from([
                     ("refs".into(), SNAPSHOT_REFS_INODE),
                     ("tag".into(), SNAPSHOT_TAG_INODE),
+                    ("c".into(), SNAPSHOT_HASH_INODE),
                 ]),
                 parent: ROOT_INODE,
             },
         );
         entries.insert(
             SNAPSHOT_TAG_INODE,
+            Entry::Dir {
+                children: HashMap::new(),
+                parent: SNAPSHOT_DIR_INODE,
+            },
+        );
+        entries.insert(
+            SNAPSHOT_HASH_INODE,
             Entry::Dir {
                 children: HashMap::new(),
                 parent: SNAPSHOT_DIR_INODE,
@@ -339,6 +348,68 @@ impl SqliteFs {
             }
         }
         total
+    }
+
+    /// Resolve a hex hash prefix in .sqlitefs/c/ into a Dir with the commit's tree.
+    fn resolve_hash_prefix(
+        db: &rusqlite::Connection,
+        ino_gen: &mut InoGen,
+        entries: &mut HashMap<u64, Entry>,
+        hex_prefix: &str,
+        parent: u64,
+    ) -> Option<u64> {
+        // Match prefix against commit hashes. Use LIKE with the hex-encoded hash.
+        let mut stmt = db
+            .prepare(
+                "SELECT hash, tree_cid, timestamp FROM commits WHERE lower(hex(hash)) LIKE ?1 ORDER BY timestamp DESC LIMIT 2",
+            )
+            .ok()?;
+        let rows: Vec<(Vec<u8>, Vec<u8>, i64)> = stmt
+            .query_map(rusqlite::params![format!("{hex_prefix}%")], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .ok()?
+            .filter_map(Result::ok)
+            .collect();
+        if rows.len() != 1 {
+            return None; // ambiguous or not found
+        }
+        let (_commit_hash, tree_cid, _timestamp) = &rows[0];
+
+        // Build directory tree from directory_index.
+        let mut dir_children = HashMap::new();
+        let mut cs = db
+            .prepare("SELECT name, child_cid FROM directory_index WHERE parent_cid = ?1")
+            .ok()?;
+        let child_rows: Vec<(String, Vec<u8>)> = cs
+            .query_map(rusqlite::params![tree_cid], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .ok()?
+            .filter_map(Result::ok)
+            .collect();
+        for (child_name, child_cid) in child_rows {
+            let ino = ino_gen.next();
+            let size = Self::file_size_from_cid(db, &child_cid);
+            entries.insert(
+                ino,
+                Entry::File {
+                    size,
+                    manifest_cid: Some(child_cid),
+                    v1_2025_cid: None,
+                },
+            );
+            dir_children.insert(child_name, ino);
+        }
+        let dir_ino = ino_gen.next();
+        entries.insert(
+            dir_ino,
+            Entry::Dir {
+                children: dir_children,
+                parent,
+            },
+        );
+        Some(dir_ino)
     }
 
     /// Auto-commit if dirty and interval elapsed. Called from every FUSE op.
@@ -486,6 +557,58 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(libc::EINVAL);
             return;
         };
+        // Resolve .sqlitefs/c/<hash-prefix>/ — query commits table, build dir tree.
+        if parent == SNAPSHOT_HASH_INODE {
+            let hex = name_str.to_ascii_lowercase();
+            let name_owned = name_str.to_string();
+            let target_ino: u64 = {
+                let Some(Entry::Dir { children, .. }) = self.entries.get(&parent) else {
+                    reply.error(ENOTDIR);
+                    return;
+                };
+                if let Some(&ino) = children.get(name_str) {
+                    ino
+                } else {
+                    match Self::resolve_hash_prefix(
+                        &self.db,
+                        &mut self.ino_gen,
+                        &mut self.entries,
+                        &hex,
+                        SNAPSHOT_HASH_INODE,
+                    ) {
+                        Some(ino) => {
+                            // Cache the name→ino mapping in .sqlitefs/c/.
+                            if let Some(Entry::Dir { children, .. }) =
+                                self.entries.get_mut(&SNAPSHOT_HASH_INODE)
+                            {
+                                children.insert(name_owned.clone(), ino);
+                            }
+                            ino
+                        }
+                        None => {
+                            reply.error(ENOENT);
+                            return;
+                        }
+                    }
+                }
+            };
+            let Some(child) = self.entries.get(&target_ino) else {
+                reply.error(ENOENT);
+                return;
+            };
+            let (kind, size) = match child {
+                Entry::Dir { .. } => (FileType::Directory, 0),
+                Entry::Symlink { .. } => (FileType::Symlink, 0),
+                Entry::File { size, .. } => (FileType::RegularFile, *size),
+            };
+            reply.entry(
+                &std::time::Duration::MAX,
+                &make_attr(target_ino, kind, size),
+                0,
+            );
+            return;
+        }
+
         let Some(Entry::Dir { children, .. }) = self.entries.get(&parent) else {
             reply.error(ENOTDIR);
             return;
@@ -543,22 +666,21 @@ impl fuser::Filesystem for SqliteFs {
         reply: ReplyAttr,
     ) {
         // Only truncation is implemented; mode/uid/gid/utimes are silently ignored.
-        if let Some(new_size) = size {
-            if new_size == 0 {
-                if let Some(Entry::File {
-                    size: s,
-                    manifest_cid,
-                    v1_2025_cid,
-                }) = self.entries.get_mut(&ino)
-                {
-                    *s = 0;
-                    *manifest_cid = None;
-                    *v1_2025_cid = None;
-                    self.open_files.retain(|&(i, _), _| i != ino);
-                    self.dirty_root = true;
-                    if self.dirty_root {
-                        let _ = self.commit_dirty_tree();
-                    }
+        #[allow(clippy::collapsible_if)]
+        if let Some(0) = size {
+            if let Some(Entry::File {
+                size: s,
+                manifest_cid,
+                v1_2025_cid,
+            }) = self.entries.get_mut(&ino)
+            {
+                *s = 0;
+                *manifest_cid = None;
+                *v1_2025_cid = None;
+                self.open_files.retain(|&(i, _), _| i != ino);
+                self.dirty_root = true;
+                if self.dirty_root {
+                    let _ = self.commit_dirty_tree();
                 }
             }
             // ponytail: non-zero truncation on committed files not implemented
@@ -588,7 +710,10 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(libc::EINVAL);
             return;
         };
-        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+        if parent == SNAPSHOT_DIR_INODE
+            || parent == SNAPSHOT_REFS_INODE
+            || parent == SNAPSHOT_HASH_INODE
+        {
             reply.error(libc::EROFS);
             return;
         }
@@ -625,7 +750,10 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(libc::EINVAL);
             return;
         };
-        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+        if parent == SNAPSHOT_DIR_INODE
+            || parent == SNAPSHOT_REFS_INODE
+            || parent == SNAPSHOT_HASH_INODE
+        {
             reply.error(libc::EROFS);
             return;
         }
@@ -713,7 +841,10 @@ impl fuser::Filesystem for SqliteFs {
             );
             return;
         }
-        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+        if parent == SNAPSHOT_DIR_INODE
+            || parent == SNAPSHOT_REFS_INODE
+            || parent == SNAPSHOT_HASH_INODE
+        {
             reply.error(libc::EROFS);
             return;
         }
@@ -876,7 +1007,10 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(libc::EINVAL);
             return;
         };
-        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+        if parent == SNAPSHOT_DIR_INODE
+            || parent == SNAPSHOT_REFS_INODE
+            || parent == SNAPSHOT_HASH_INODE
+        {
             reply.error(libc::EROFS);
             return;
         }
@@ -993,7 +1127,10 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(libc::EINVAL);
             return;
         };
-        if parent == SNAPSHOT_DIR_INODE || parent == SNAPSHOT_REFS_INODE {
+        if parent == SNAPSHOT_DIR_INODE
+            || parent == SNAPSHOT_REFS_INODE
+            || parent == SNAPSHOT_HASH_INODE
+        {
             reply.error(libc::EROFS);
             return;
         }
@@ -1046,6 +1183,7 @@ impl fuser::Filesystem for SqliteFs {
             || parent == SNAPSHOT_REFS_INODE
             || newparent == SNAPSHOT_DIR_INODE
             || newparent == SNAPSHOT_REFS_INODE
+            || newparent == SNAPSHOT_HASH_INODE
         {
             reply.error(libc::EROFS);
             return;
@@ -1161,7 +1299,7 @@ impl fuser::Filesystem for SqliteFs {
     }
 
     fn forget(&mut self, _req: &Request, ino: u64, _nlookup: u64) {
-        if ino > SNAPSHOT_TAG_INODE {
+        if ino > SNAPSHOT_HASH_INODE {
             self.entries.remove(&ino);
         }
     }
