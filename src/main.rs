@@ -299,26 +299,28 @@ impl SqliteFs {
     }
 
     fn file_size_from_cid(db: &rusqlite::Connection, cid: &[u8]) -> u64 {
-        if let Ok(data) = db.query_row(
+        let data: Vec<u8> = match db.query_row(
             "SELECT data FROM chunks WHERE hash = ?1",
             rusqlite::params![cid],
-            |r| r.get::<_, Vec<u8>>(0),
+            |r| r.get(0),
         ) {
-            if let Some(hashes) = dag::decode_file_manifest(&data) {
-                let mut total: u64 = 0;
-                for h in hashes {
-                    if let Ok(chunk_data) = db.query_row(
-                        "SELECT data FROM chunks WHERE hash = ?1",
-                        rusqlite::params![h.to_vec()],
-                        |r| r.get::<_, Vec<u8>>(0),
-                    ) {
-                        total += chunk_data.len() as u64;
-                    }
-                }
-                return total;
+            Ok(d) => d,
+            Err(_) => return 0,
+        };
+        let Some(hashes) = dag::decode_file_manifest(&data) else {
+            return 0;
+        };
+        let mut total: u64 = 0;
+        for h in hashes {
+            if let Ok(chunk_data) = db.query_row(
+                "SELECT data FROM chunks WHERE hash = ?1",
+                rusqlite::params![h.to_vec()],
+                |r| r.get::<_, Vec<u8>>(0),
+            ) {
+                total += chunk_data.len() as u64;
             }
         }
-        0
+        total
     }
 
     /// Rebuild the DAG for the root tree, create a commit, and update the snapshot view.
@@ -400,7 +402,7 @@ impl SqliteFs {
                     child_cid.to_bytes()
                 }
                 Some(Entry::File {
-                    manifest_cid: Some(ref cid),
+                    manifest_cid: Some(cid),
                     ..
                 }) => cid.clone(),
                 Some(Entry::File {
@@ -794,7 +796,7 @@ impl fuser::Filesystem for SqliteFs {
         // Read committed file: resolve manifest → chunks → assemble.
         if let Some(Entry::File {
             size,
-            manifest_cid: Some(ref cid),
+            manifest_cid: Some(cid),
             ..
         }) = self.entries.get(&ino)
         {
