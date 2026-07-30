@@ -523,6 +523,58 @@ impl fuser::Filesystem for SqliteFs {
         reply.attr(&std::time::Duration::MAX, &make_attr(ino, kind, size));
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<std::time::SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<std::time::SystemTime>,
+        _chgtime: Option<std::time::SystemTime>,
+        _bkuptime: Option<std::time::SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        // Only truncation is implemented; mode/uid/gid/utimes are silently ignored.
+        if let Some(new_size) = size {
+            if new_size == 0 {
+                if let Some(Entry::File {
+                    size: s,
+                    manifest_cid,
+                    v1_2025_cid,
+                }) = self.entries.get_mut(&ino)
+                {
+                    *s = 0;
+                    *manifest_cid = None;
+                    *v1_2025_cid = None;
+                    self.open_files.retain(|&(i, _), _| i != ino);
+                    self.dirty_root = true;
+                    if self.dirty_root {
+                        let _ = self.commit_dirty_tree();
+                    }
+                }
+            }
+            // ponytail: non-zero truncation on committed files not implemented
+        }
+        let (kind, s) = match self.entries.get(&ino) {
+            Some(Entry::Dir { .. }) => (FileType::Directory, 0),
+            Some(Entry::Symlink { .. }) => (FileType::Symlink, 0),
+            Some(Entry::File { size, .. }) => (FileType::RegularFile, *size),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        reply.attr(&std::time::Duration::MAX, &make_attr(ino, kind, s));
+    }
+
     fn mkdir(
         &mut self,
         _req: &Request,

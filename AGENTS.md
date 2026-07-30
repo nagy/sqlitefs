@@ -56,7 +56,7 @@ See `docs/adr/` for the full record. Summary:
 | `symlink`, `readlink` | ✓ |
 | `forget` | ✓ |
 | `getxattr`, `listxattr` | Stub (no xattrs) |
-| `setattr` (truncate, chmod, utimes) | Not implemented |
+| `setattr` (truncate-to-zero) | ✓ (auto-commit; mode/uid/utimes ignored) |
 | `flush`, `fsync` | Not needed (no-op ok) |
 
 ## Snapshot model
@@ -69,7 +69,7 @@ See `docs/adr/` for the full record. Summary:
 ## Remaining work
 
 - **`.sqlitefs/c/<hash-prefix>/`** — direct commit access by hash
-- **`setattr`** — truncate, chmod, utimes
+- **`setattr`** — ~~truncate-to-zero~~ ✓ | chmod, utimes — still not implemented
 - **GC** — delete unreachable chunks, user-initiated VACUUM
 - **Symlinks in DAG** — currently not persisted in commits (marked as ponytail skip)
 - **Recursive snapshot tree refresh on `rename`/`rmdir`/`mkdir`** — ✓ (auto-commit rebuilds snapshot tree)
