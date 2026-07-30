@@ -239,6 +239,71 @@ fn cbor_bytes(data: &[u8], buf: &mut Vec<u8>) {
 }
 
 // ---------------------------------------------------------------------------
+// file manifest — CBOR array of chunk hashes
+// ---------------------------------------------------------------------------
+
+/// Encode a file manifest: CBOR array of 32-byte chunk hash blobs.
+pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]]) -> (Vec<u8>, Cid) {
+    let mut buf = Vec::new();
+    let n = chunk_hashes.len();
+    if n <= 23 {
+        buf.push(0x80 | n as u8);
+    } else {
+        buf.push(0x98);
+        buf.push(n as u8);
+    }
+    for hash in chunk_hashes {
+        cbor_bytes(hash, &mut buf);
+    }
+    let cid = Cid::hash_dag_cbor(&buf);
+    (buf, cid)
+}
+
+/// Parse a file manifest CBOR array, returning chunk hashes.
+/// Returns None on parse failure.
+pub fn decode_file_manifest(data: &[u8]) -> Option<Vec<[u8; 32]>> {
+    if data.is_empty() {
+        return None;
+    }
+    let (count, mut pos): (usize, usize) = match data[0] {
+        b @ 0x80..=0x97 => ((b - 0x80) as usize, 1),
+        0x98 => (data.get(1).copied()? as usize, 2),
+        _ => return None,
+    };
+    let mut hashes = Vec::with_capacity(count);
+    for _ in 0..count {
+        let tag = *data.get(pos)?;
+        let (len, tag_len): (usize, usize) = match tag {
+            0x58 => (*data.get(pos + 1)? as usize, 2),
+            0x59 => {
+                let l = u16::from_be_bytes([*data.get(pos + 1)?, *data.get(pos + 2)?]) as usize;
+                (l, 3)
+            }
+            0x40..=0x57 => ((tag - 0x40) as usize, 1),
+            0x5a => {
+                let l = u32::from_be_bytes([
+                    *data.get(pos + 1)?,
+                    *data.get(pos + 2)?,
+                    *data.get(pos + 3)?,
+                    *data.get(pos + 4)?,
+                ]) as usize;
+                (l, 5)
+            }
+            _ => return None,
+        };
+        if len != 32 {
+            return None;
+        }
+        let start = pos + tag_len;
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(data.get(start..start + 32)?);
+        hashes.push(hash);
+        pos = start + 32;
+    }
+    Some(hashes)
+}
+
+// ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
 
@@ -274,5 +339,37 @@ mod tests {
         assert_eq!(cid_bytes.len(), 4 + 32);
         // Verify CBOR starts with map(2)
         assert_eq!(cbor[0] & 0xf0, 0xa0);
+    }
+
+    #[test]
+    fn test_file_manifest_roundtrip() {
+        let chunk = [42u8; 32];
+        let (data, cid) = encode_file_manifest(&[chunk]);
+        let hashes = decode_file_manifest(&data).unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0], chunk);
+        assert_eq!(cid.codec(), DAG_CBOR);
+    }
+
+    #[test]
+    fn test_file_manifest_multi_chunk() {
+        let mut chunks = Vec::new();
+        for i in 0..5 {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            chunks.push(h);
+        }
+        let (data, _) = encode_file_manifest(&chunks);
+        let decoded = decode_file_manifest(&data).unwrap();
+        assert_eq!(decoded.len(), 5);
+        assert_eq!(decoded, chunks);
+    }
+
+    #[test]
+    fn test_empty_file_manifest() {
+        let (data, _) = encode_file_manifest(&[]);
+        assert_eq!(data, vec![0x80]); // CBOR empty array
+        let decoded = decode_file_manifest(&data).unwrap();
+        assert!(decoded.is_empty());
     }
 }
