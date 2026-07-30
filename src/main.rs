@@ -178,6 +178,8 @@ enum Entry {
         size: u64,
         /// Manifest CID (content-addressed list of chunk hashes).
         manifest_cid: Option<Vec<u8>>,
+        /// v1-2025 root CID (IPFS-compatible).
+        v1_2025_cid: Option<Vec<u8>>,
     },
 }
 
@@ -278,6 +280,7 @@ impl SqliteFs {
                     Entry::File {
                         size,
                         manifest_cid: Some(child_cid),
+                        v1_2025_cid: None,
                     },
                 );
                 dir_children.insert(child_name, ino);
@@ -592,6 +595,7 @@ impl fuser::Filesystem for SqliteFs {
             Entry::File {
                 size: 0,
                 manifest_cid: None,
+                v1_2025_cid: None,
             },
         );
 
@@ -673,8 +677,28 @@ impl fuser::Filesystem for SqliteFs {
                     "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
                     rusqlite::params![mc.to_bytes(), manifest_data],
                 );
-                if let Some(Entry::File { manifest_cid, .. }) = self.entries.get_mut(&ino) {
+
+                // Build v1-2025 DAG (IPFS-compatible) from the assembled file.
+                let v1_dag = dag::build_v1_2025_dag(&df.data);
+                for block in &v1_dag.blocks {
+                    let _ = self.db.execute(
+                        "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+                        rusqlite::params![block.cid.to_bytes(), block.data],
+                    );
+                    let _ = self.db.execute(
+                        "INSERT OR IGNORE INTO block_index (v1_2025_cid, file_cid, block_offset, block_length) VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![block.cid.to_bytes(), mc.to_bytes(), block.file_offset as i64, block.data.len() as i64],
+                    );
+                }
+
+                if let Some(Entry::File {
+                    manifest_cid,
+                    v1_2025_cid,
+                    ..
+                }) = self.entries.get_mut(&ino)
+                {
                     *manifest_cid = Some(mc.to_bytes());
+                    *v1_2025_cid = Some(v1_dag.root.to_bytes());
                 }
             }
             self.dirty_root = true;
@@ -748,6 +772,7 @@ impl fuser::Filesystem for SqliteFs {
         if let Some(Entry::File {
             size,
             manifest_cid: Some(ref cid),
+            ..
         }) = self.entries.get(&ino)
         {
             let off = offset as usize;

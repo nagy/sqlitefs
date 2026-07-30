@@ -304,6 +304,117 @@ pub fn decode_file_manifest(data: &[u8]) -> Option<Vec<[u8; 32]>> {
 }
 
 // ---------------------------------------------------------------------------
+// v1-2025: UnixFS file DAG with 1 MiB raw leaves
+// ---------------------------------------------------------------------------
+
+const V1_CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
+const UNIXFS_FILE: &[u8] = &[0x08, 0x02];
+
+/// One block in a v1-2025 DAG.
+#[derive(Clone)]
+pub struct V1Block {
+    pub data: Vec<u8>,
+    pub cid: Cid,
+    /// Byte offset within the file (0 for non-leaf dag-pb nodes).
+    pub file_offset: u64,
+}
+
+/// All blocks produced during DAG construction.
+pub struct V1Dag {
+    pub blocks: Vec<V1Block>,
+    pub root: Cid,
+}
+
+/// Build a v1-2025 UnixFS DAG for a file's worth of bytes.
+/// The physical CDC chunks must already be concatenated into `data`.
+pub fn build_v1_2025_dag(data: &[u8]) -> V1Dag {
+    if data.is_empty() {
+        let r = Cid::hash_raw(b"");
+        return V1Dag {
+            blocks: vec![V1Block {
+                data: vec![],
+                cid: r.clone(),
+                file_offset: 0,
+            }],
+            root: r,
+        };
+    }
+
+    let total = data.len() as u64;
+
+    // Leaf level: split into 1 MiB raw blocks with file offsets.
+    let leaf_blocks: Vec<V1Block> = data
+        .chunks(V1_CHUNK_SIZE)
+        .enumerate()
+        .map(|(i, chunk)| {
+            let cid = Cid::hash_raw(chunk);
+            V1Block {
+                data: chunk.to_vec(),
+                cid,
+                file_offset: (i * V1_CHUNK_SIZE) as u64,
+            }
+        })
+        .collect();
+
+    if leaf_blocks.len() == 1 {
+        let b = &leaf_blocks[0];
+        return V1Dag {
+            blocks: vec![b.clone()],
+            root: b.cid.clone(),
+        };
+    }
+
+    // Build balanced tree of dag-pb intermediate nodes.
+    let mut blocks: Vec<V1Block> = leaf_blocks.clone();
+    let mut current: Vec<(Vec<u8>, Cid)> = leaf_blocks
+        .iter()
+        .map(|b| (b.data.clone(), b.cid.clone()))
+        .collect();
+
+    while current.len() > 1 {
+        let mut next_level = Vec::new();
+        for group in current.chunks(128) {
+            let links: Vec<PbLink> = group
+                .iter()
+                .map(|(_, cid)| PbLink {
+                    hash: cid.to_bytes(),
+                    name: String::new(),
+                    tsize: total,
+                })
+                .collect();
+
+            let mut unixfs_data = Vec::from(UNIXFS_FILE);
+            encode_uvarint(total, &mut unixfs_data);
+            let node_data = encode_pb_node(&unixfs_data, &links);
+            let node_cid = Cid::hash_dag_pb(&node_data);
+            blocks.push(V1Block {
+                data: node_data.clone(),
+                cid: node_cid.clone(),
+                file_offset: 0,
+            });
+            next_level.push((node_data, node_cid));
+        }
+        current = next_level;
+    }
+
+    let (_, root_cid) = current.into_iter().next().unwrap();
+    V1Dag {
+        blocks,
+        root: root_cid,
+    }
+}
+
+/// Encode a uint64 as a varint into the buffer.
+fn encode_uvarint(value: u64, buf: &mut Vec<u8>) {
+    let mut v = value;
+    while v >= 0x80 {
+        buf.push((v as u8 & 0x7f) | 0x80);
+        v >>= 7;
+    }
+    buf.push(v as u8);
+}
+
+// ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
 
@@ -371,5 +482,40 @@ mod tests {
         assert_eq!(data, vec![0x80]); // CBOR empty array
         let decoded = decode_file_manifest(&data).unwrap();
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_v1_2025_empty() {
+        let dag = build_v1_2025_dag(b"");
+        assert_eq!(dag.blocks.len(), 1);
+        assert_eq!(dag.blocks[0].data.len(), 0);
+        assert_eq!(dag.blocks[0].cid.codec(), RAW);
+    }
+
+    #[test]
+    fn test_v1_2025_small_file() {
+        let data = b"hello";
+        let dag = build_v1_2025_dag(data);
+        assert_eq!(dag.blocks.len(), 1);
+        assert_eq!(dag.blocks[0].data, data);
+        assert_eq!(dag.blocks[0].file_offset, 0);
+        assert_eq!(dag.blocks[0].cid.codec(), RAW);
+        // Same input, same CID.
+        let dag2 = build_v1_2025_dag(data);
+        assert_eq!(dag.root.to_bytes(), dag2.root.to_bytes());
+    }
+
+    #[test]
+    fn test_v1_2025_multi_block() {
+        let data = vec![0x42u8; 3 * 1024 * 1024]; // 3 MiB → 3 raw leaves + intermediates
+        let dag = build_v1_2025_dag(&data);
+        // At least 3 leaf blocks.
+        let leaves: Vec<_> = dag.blocks.iter().filter(|b| b.cid.codec() == RAW).collect();
+        assert_eq!(leaves.len(), 3);
+        assert_eq!(leaves[0].file_offset, 0);
+        assert_eq!(leaves[1].file_offset, 1 * 1024 * 1024);
+        assert_eq!(leaves[2].file_offset, 2 * 1024 * 1024);
+        // Root is dag-pb.
+        assert_eq!(dag.root.codec(), DAG_PB);
     }
 }
