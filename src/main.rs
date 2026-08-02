@@ -134,11 +134,15 @@ fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         rusqlite::params![commit_cid.to_bytes()],
     )?;
 
-    let hash_hex: String = commit_cid
-        .hash_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let hash_hex: String =
+        commit_cid
+            .hash_bytes()
+            .iter()
+            .fold(String::with_capacity(64), |mut s, b| {
+                use std::fmt::Write;
+                let _ = write!(s, "{b:02x}");
+                s
+            });
     println!(
         "Created repository at {} (commit {})",
         path.display(),
@@ -342,7 +346,7 @@ impl SqliteFs {
         })
     }
 
-    /// Walk DB refs/commits/directory_index and build the snapshot tree.
+    /// Walk DB `refs/commits/directory_index` and build the snapshot tree.
     fn load_snapshot_tree(
         db: &rusqlite::Connection,
         ino_gen: &mut InoGen,
@@ -369,7 +373,7 @@ impl SqliteFs {
         Ok(refs_children)
     }
 
-    /// Recursively load a directory from directory_index, building Entry trees.
+    /// Recursively load a directory from `directory_index`, building Entry trees.
     fn load_dir_recursive(
         db: &rusqlite::Connection,
         ino_gen: &mut InoGen,
@@ -634,8 +638,8 @@ impl SqliteFs {
     }
 
     /// Recursively build a dag-pb directory node for `inode` and its children.
-    /// Returns (encoded_dag_pb, Cid). Also inserts file manifests + chunks into DB
-    /// and populates directory_index.
+    /// Returns (`encoded_dag_pb`, Cid). Also inserts file manifests + chunks into DB
+    /// and populates `directory_index`.
     fn build_dir_dag(
         &self,
         tx: &rusqlite::Transaction,
@@ -730,28 +734,23 @@ impl fuser::Filesystem for SqliteFs {
                 };
                 if let Some(&ino) = children.get(name_str) {
                     ino
-                } else {
-                    match Self::resolve_hash_prefix(
-                        &self.db,
-                        &mut self.ino_gen,
-                        &mut self.entries,
-                        &hex,
-                        SNAPSHOT_HASH_INODE,
-                    ) {
-                        Some(ino) => {
-                            // Cache the name→ino mapping in .sqlitefs/c/.
-                            if let Some(Entry::Dir { children, .. }) =
-                                self.entries.get_mut(&SNAPSHOT_HASH_INODE)
-                            {
-                                children.insert(name_owned.clone(), ino);
-                            }
-                            ino
-                        }
-                        None => {
-                            reply.error(ENOENT);
-                            return;
-                        }
+                } else if let Some(ino) = Self::resolve_hash_prefix(
+                    &self.db,
+                    &mut self.ino_gen,
+                    &mut self.entries,
+                    &hex,
+                    SNAPSHOT_HASH_INODE,
+                ) {
+                    // Cache the name→ino mapping in .sqlitefs/c/.
+                    if let Some(Entry::Dir { children, .. }) =
+                        self.entries.get_mut(&SNAPSHOT_HASH_INODE)
+                    {
+                        children.insert(name_owned.clone(), ino);
                     }
+                    ino
+                } else {
+                    reply.error(ENOENT);
+                    return;
                 }
             };
             let Some(child) = self.entries.get(&target_ino) else {
@@ -845,7 +844,7 @@ impl fuser::Filesystem for SqliteFs {
                 *v1_2025_cid = None;
                 // Clear any open file buffers for this inode (don't remove them;
                 // a write may follow from the same open file handle, e.g. echo > file).
-                for ((i, _), df) in self.open_files.iter_mut() {
+                for ((i, _), df) in &mut self.open_files {
                     if *i == ino {
                         df.data.clear();
                     }
@@ -1084,6 +1083,12 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(libc::EBADF);
             return;
         };
+        // Negative or huge offsets would make `off as usize` wrap and resize a
+        // gigantic buffer (OOM/panic). Reject them before use.
+        if offset < 0 {
+            reply.error(libc::EINVAL);
+            return;
+        }
         let off = offset as usize;
         let end = off + data.len();
         if end > df.data.len() {
@@ -1501,5 +1506,161 @@ fn main() {
     if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sqlitefs-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    /// Init a repo and open it, verifying the schema + empty main ref exist.
+    #[test]
+    fn test_init_then_open() {
+        let path = temp_db_path("init_open.db");
+        init_repo(&path).unwrap();
+        let fs = SqliteFs::open(&path).unwrap();
+        // main ref must be present in the snapshot tree.
+        let refs = match fs.entries.get(&SNAPSHOT_REFS_INODE) {
+            Some(Entry::Dir { children, .. }) => children,
+            other => panic!("refs inode should be a Dir, got {:?}", other.map(|_| ())),
+        };
+        assert!(refs.contains_key("main"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Commit an in-memory tree and verify it round-trips through reopen.
+    #[test]
+    fn test_commit_roundtrip_persists_file() {
+        let path = temp_db_path("commit_roundtrip.db");
+        init_repo(&path).unwrap();
+        let mut fs = SqliteFs::open(&path).unwrap();
+
+        // Store a small file's chunks + manifest directly (release-path building blocks).
+        let data = b"hello sqlitefs".to_vec();
+        let chunks = cdc::chunk_file(&data);
+        let chunk_hashes: Vec<[u8; 32]> = chunks.iter().map(|(h, _)| *h).collect();
+        for (h, c) in &chunks {
+            fs.db
+                .execute(
+                    "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+                    rusqlite::params![h.to_vec(), c],
+                )
+                .unwrap();
+        }
+        let mc = store_file_manifest(&fs.db, &chunk_hashes, data.len() as u64);
+
+        // Insert a File entry into the writable root.
+        let ino = fs.ino_gen.next();
+        fs.entries.insert(
+            ino,
+            Entry::File {
+                size: data.len() as u64,
+                manifest_cid: Some(mc.to_bytes()),
+                v1_2025_cid: None,
+            },
+        );
+        if let Some(Entry::Dir { children, .. }) = fs.entries.get_mut(&ROOT_INODE) {
+            children.insert("hello.txt".to_string(), ino);
+        }
+        fs.dirty_root = true;
+
+        fs.commit_as_ref("main").unwrap();
+
+        // Reopen: the file must be back in the writable root with correct size.
+        let fs2 = SqliteFs::open(&path).unwrap();
+        let root_children = match fs2.entries.get(&ROOT_INODE) {
+            Some(Entry::Dir { children, .. }) => children,
+            other => panic!("root should be a Dir, got {:?}", other.map(|_| ())),
+        };
+        let hello_ino = root_children
+            .get("hello.txt")
+            .expect("hello.txt should survive commit + reopen");
+        match fs2.entries.get(hello_ino) {
+            Some(Entry::File {
+                size, manifest_cid, ..
+            }) => {
+                assert_eq!(*size, data.len() as u64);
+                assert_eq!(manifest_cid.as_deref(), Some(mc.to_bytes().as_slice()));
+            }
+            other => panic!("hello.txt should be a File, got {:?}", other.map(|_| ())),
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// store_released_file writes chunks + manifest + blocks atomically;
+    /// the manifest must decode back to the file's size.
+    #[test]
+    fn test_store_released_file_roundtrip() {
+        let path = temp_db_path("released.db");
+        init_repo(&path).unwrap();
+        let mut fs = SqliteFs::open(&path).unwrap();
+
+        let data = b"the quick brown fox jumps over the lazy dog".repeat(100);
+        let chunks = cdc::chunk_file(&data);
+        let mc = fs.store_released_file(&data, &chunks).unwrap();
+
+        // Manifest decodes to (size, hashes) matching the input.
+        let manifest_data: Vec<u8> = fs
+            .db
+            .query_row(
+                "SELECT data FROM chunks WHERE hash = ?1",
+                rusqlite::params![mc.to_bytes()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let (size, hashes) = dag::decode_file_manifest(&manifest_data).unwrap();
+        assert_eq!(size, Some(data.len() as u64));
+        assert_eq!(hashes, chunk_hashes(&chunks));
+
+        // All chunks are present in the store.
+        for (h, _) in &chunks {
+            let present: bool = fs
+                .db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chunks WHERE hash = ?1)",
+                    rusqlite::params![h.to_vec()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(present, "chunk {} missing", hex(&h));
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// store_empty_manifest produces a decodable empty manifest.
+    #[test]
+    fn test_empty_manifest_roundtrip() {
+        let path = temp_db_path("empty.db");
+        init_repo(&path).unwrap();
+        let fs = SqliteFs::open(&path).unwrap();
+        let bytes = store_empty_manifest(&fs.db);
+        let data: Vec<u8> = fs
+            .db
+            .query_row(
+                "SELECT data FROM chunks WHERE hash = ?1",
+                rusqlite::params![&bytes],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let (size, hashes) = dag::decode_file_manifest(&data).unwrap();
+        assert_eq!(size, Some(0));
+        assert!(hashes.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn chunk_hashes(chunks: &[([u8; 32], Vec<u8>)]) -> Vec<[u8; 32]> {
+        chunks.iter().map(|(h, _)| *h).collect()
+    }
+
+    fn hex(b: &[u8; 32]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
     }
 }

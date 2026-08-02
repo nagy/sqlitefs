@@ -80,8 +80,8 @@ fn encode_varint(mut v: u64, buf: &mut Vec<u8>) {
 // ---------------------------------------------------------------------------
 
 /// Build an empty UnixFS directory dag-pb node.
-/// Returns (encoded_dag_pb_bytes, CID).
-/// PBNode { Data: [0x08, 0x01] (UnixFS Type=Directory), Links: [] }
+/// Returns (`encoded_dag_pb_bytes`, CID).
+/// `PBNode` { Data: [0x08, 0x01] (UnixFS Type=Directory), Links: [] }
 pub fn empty_dir() -> (Vec<u8>, Cid) {
     let data = encode_pb_node(&[0x08, 0x01], &[]);
     let cid = Cid::hash_dag_pb(&data);
@@ -89,7 +89,7 @@ pub fn empty_dir() -> (Vec<u8>, Cid) {
 }
 
 /// Build a UnixFS directory dag-pb node with children.
-/// Each link: (name, cid_bytes, tsize=0).
+/// Each link: (name, `cid_bytes`, tsize=0).
 #[allow(dead_code)]
 pub fn dir_with_links(links: &[(&str, &[u8])]) -> (Vec<u8>, Cid) {
     let link_data: Vec<PbLink> = links
@@ -119,7 +119,7 @@ fn pb_tag(field: u64, wire: u8) -> u64 {
     (field << 3) | u64::from(wire)
 }
 
-/// Encode a PBNode: Data (field 1, bytes) + Links (field 2, repeated message)
+/// Encode a `PBNode`: Data (field 1, bytes) + Links (field 2, repeated message)
 fn encode_pb_node(data: &[u8], links: &[PbLink]) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -169,8 +169,8 @@ fn encode_pb_wire_type(_wire: u8, tag: u64, buf: &mut Vec<u8>) {
 // dag-cbor: minimal CBOR encoder for commit objects
 // ---------------------------------------------------------------------------
 
-/// Encode a dag-cbor map: {parent: null_or_cid, tree: cid, timestamp: u64}
-/// parent_cid = None encodes as CBOR null.
+/// Encode a dag-cbor map: {parent: `null_or_cid`, tree: cid, timestamp: u64}
+/// `parent_cid` = None encodes as CBOR null.
 ///
 /// Canonical dag-cbor: map keys sorted by (length, byte-order) — tree (4),
 /// parent (6), timestamp (9) — and CIDs as tag-42 byte strings (RFC 7049 §3.9,
@@ -258,7 +258,7 @@ fn cbor_bytes(data: &[u8], buf: &mut Vec<u8>) {
 /// Encode a file manifest: CBOR array [<size-bytestring>, hash1, ..., hashN].
 /// The first element is the file size encoded as a byte string (1–8 bytes, never
 /// 32, so it is distinguishable from a chunk hash), followed by the 32-byte chunk
-/// hashes. Embedding the size means stat() never has to fetch chunk data.
+/// hashes. Embedding the size means `stat()` never has to fetch chunk data.
 pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]], size: u64) -> (Vec<u8>, Cid) {
     let mut buf = Vec::new();
     let n = chunk_hashes.len() + 1; // +1 for the size element
