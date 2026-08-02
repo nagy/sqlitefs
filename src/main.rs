@@ -199,6 +199,31 @@ struct DirtyFile {
     data: Vec<u8>,
 }
 
+/// Write an empty file manifest (dag-cbor `[]`) into `db` and return its CID bytes.
+/// Works on a plain connection or a transaction (Transaction derefs to Connection).
+fn store_empty_manifest(db: &rusqlite::Connection) -> Vec<u8> {
+    let (manifest_data, mc) = dag::encode_file_manifest(&[], 0);
+    let _ = db.execute(
+        "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+        rusqlite::params![mc.to_bytes(), manifest_data],
+    );
+    mc.to_bytes()
+}
+
+/// Write a file manifest + its chunks into `db` (a connection or transaction).
+fn store_file_manifest(
+    db: &rusqlite::Connection,
+    chunk_hashes: &[[u8; 32]],
+    size: u64,
+) -> dag::Cid {
+    let (manifest_data, mc) = dag::encode_file_manifest(chunk_hashes, size);
+    let _ = db.execute(
+        "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+        rusqlite::params![mc.to_bytes(), manifest_data],
+    );
+    mc
+}
+
 struct SqliteFs {
     db: rusqlite::Connection,
     entries: HashMap<u64, Entry>,
@@ -489,18 +514,22 @@ impl SqliteFs {
 
     /// Create a named commit (ref) from the current dirty tree.
     fn commit_as_ref(&mut self, ref_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Everything from the DAG build to the ref update happens in ONE transaction:
+        // a crash mid-commit can no longer leave orphan chunks/commits or a ref
+        // pointing at a missing commit. Single-threaded FUSE ops → unchecked is fine.
+        let tx = self.db.unchecked_transaction()?;
+
         // Build recursive DAG from the entry tree rooted at ROOT_INODE.
-        let (tree_data, tree_cid) = self.build_dir_dag(ROOT_INODE)?;
+        let (tree_data, tree_cid) = self.build_dir_dag(&tx, ROOT_INODE)?;
 
         // Write the tree dag-pb node into chunks.
-        let _ = self.db.execute(
+        let _ = tx.execute(
             "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
             rusqlite::params![tree_cid.to_bytes(), tree_data],
         );
 
         // Get current commit for this ref (as parent).
-        let old_commit: Option<Vec<u8>> = self
-            .db
+        let old_commit: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT commit_hash FROM refs WHERE name = ?1",
                 rusqlite::params![ref_name],
@@ -513,18 +542,20 @@ impl SqliteFs {
             .as_secs();
         let (commit_data, commit_cid) =
             dag::encode_commit(old_commit.as_deref(), &tree_cid.to_bytes(), now);
-        let _ = self.db.execute(
+        let _ = tx.execute(
             "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
             rusqlite::params![commit_cid.to_bytes(), commit_data],
         );
-        let _ = self.db.execute(
+        let _ = tx.execute(
             "INSERT INTO commits (hash, parent, tree_cid, timestamp) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![commit_cid.to_bytes(), old_commit, tree_cid.to_bytes(), now],
         );
-        let _ = self.db.execute(
+        let _ = tx.execute(
             "INSERT OR REPLACE INTO refs (name, commit_hash) VALUES (?1, ?2)",
             rusqlite::params![ref_name, commit_cid.to_bytes()],
         );
+
+        tx.commit()?;
 
         // Rebuild snapshot tree so .sqlitefs/refs/main/ shows the new commit.
         let refs_children =
@@ -540,19 +571,74 @@ impl SqliteFs {
     /// Empty files are real files — they need a manifest CID so `build_dir_dag` links
     /// them instead of skipping them (otherwise `touch foo` loses `foo` on commit).
     fn store_empty_manifest(&mut self) -> Vec<u8> {
-        let (manifest_data, mc) = dag::encode_file_manifest(&[], 0);
-        let _ = self.db.execute(
-            "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
-            rusqlite::params![mc.to_bytes(), manifest_data],
-        );
-        mc.to_bytes()
+        store_empty_manifest(&self.db)
+    }
+
+    /// Store a released file's chunks + manifest + v1-2025 blocks in ONE transaction,
+    /// returning the manifest CID. A crash mid-write rolls back, so no partial file.
+    fn store_released_file(
+        &self,
+        data: &[u8],
+        chunks: &[([u8; 32], Vec<u8>)],
+    ) -> Result<dag::Cid, Box<dyn std::error::Error>> {
+        let chunk_hashes: Vec<[u8; 32]> = chunks.iter().map(|(h, _)| *h).collect();
+
+        // Build cumulative offsets for CDC chunk span tracking.
+        let mut cdc_spans: Vec<([u8; 32], usize, usize)> = Vec::new();
+        let mut cdc_off: usize = 0;
+        for (hash, chunk_data) in chunks {
+            let end = cdc_off + chunk_data.len();
+            cdc_spans.push((*hash, cdc_off, end));
+            cdc_off = end;
+        }
+
+        let tx = self.db.unchecked_transaction()?;
+
+        for (hash, chunk_data) in chunks {
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+                rusqlite::params![hash.to_vec(), chunk_data],
+            );
+        }
+        // Create the file manifest (dag-cbor array of chunk hashes).
+        let mc = store_file_manifest(&tx, &chunk_hashes, data.len() as u64);
+
+        // Build v1-2025 DAG (IPFS-compatible) from the assembled file.
+        let v1_dag = dag::build_v1_2025_dag(data);
+
+        for block in &v1_dag.blocks {
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+                rusqlite::params![block.cid.to_bytes(), block.data],
+            );
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO block_index (v1_2025_cid, file_cid, block_offset, block_length) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![block.cid.to_bytes(), mc.to_bytes(), block.file_offset as i64, block.data.len() as i64],
+            );
+
+            // Map backing CDC chunks for this v1-2025 block.
+            let block_start = block.file_offset as usize;
+            let block_end = block_start + block.data.len();
+            for &(ref cdc_hash, cdc_start, cdc_end) in &cdc_spans {
+                if cdc_end > block_start && cdc_start < block_end {
+                    let _ = tx.execute(
+                        "INSERT OR IGNORE INTO block_chunks (v1_2025_cid, chunk_hash) VALUES (?1, ?2)",
+                        rusqlite::params![block.cid.to_bytes(), cdc_hash.to_vec()],
+                    );
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(mc)
     }
 
     /// Recursively build a dag-pb directory node for `inode` and its children.
     /// Returns (encoded_dag_pb, Cid). Also inserts file manifests + chunks into DB
     /// and populates directory_index.
     fn build_dir_dag(
-        &mut self,
+        &self,
+        tx: &rusqlite::Transaction,
         inode: u64,
     ) -> Result<(Vec<u8>, dag::Cid), Box<dyn std::error::Error>> {
         let children_names: Vec<(String, u64)> = match self.entries.get(&inode) {
@@ -570,8 +656,8 @@ impl SqliteFs {
             }
             let child_cid = match self.entries.get(child_ino) {
                 Some(Entry::Dir { .. }) => {
-                    let (child_dag, child_cid) = self.build_dir_dag(*child_ino)?;
-                    let _ = self.db.execute(
+                    let (child_dag, child_cid) = self.build_dir_dag(tx, *child_ino)?;
+                    let _ = tx.execute(
                         "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
                         rusqlite::params![child_cid.to_bytes(), child_dag],
                     );
@@ -586,11 +672,11 @@ impl SqliteFs {
                 }) => {
                     // Empty file (created but never written, or truncated): link a
                     // real empty manifest so the file is persisted, not skipped.
-                    self.store_empty_manifest()
+                    store_empty_manifest(tx)
                 }
                 Some(Entry::Symlink { target }) => {
                     let (sym_dag, sym_cid) = dag::encode_symlink(target);
-                    let _ = self.db.execute(
+                    let _ = tx.execute(
                         "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
                         rusqlite::params![sym_cid.to_bytes(), sym_dag],
                     );
@@ -612,7 +698,7 @@ impl SqliteFs {
 
         // Populate directory_index for this node.
         for (name, child_cid) in &links {
-            let _ = self.db.execute(
+            let _ = tx.execute(
                 "INSERT OR REPLACE INTO directory_index (parent_cid, name, child_cid) VALUES (?1, ?2, ?3)",
                 rusqlite::params![dir_cid.to_bytes(), name, child_cid],
             );
@@ -1023,56 +1109,14 @@ impl fuser::Filesystem for SqliteFs {
         if let Some(df) = self.open_files.remove(&(ino, fh)) {
             if !df.data.is_empty() {
                 let chunks = cdc::chunk_file(&df.data);
-                let chunk_hashes: Vec<[u8; 32]> = chunks.iter().map(|(h, _)| *h).collect();
 
-                // Build cumulative offsets for CDC chunk span tracking.
-                let mut cdc_spans: Vec<([u8; 32], usize, usize)> = Vec::new();
-                let mut cdc_off: usize = 0;
-                for (hash, data) in &chunks {
-                    let end = cdc_off + data.len();
-                    cdc_spans.push((*hash, cdc_off, end));
-                    cdc_off = end;
-                }
-
-                for (hash, chunk_data) in &chunks {
-                    let _ = self.db.execute(
-                        "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
-                        rusqlite::params![hash.to_vec(), chunk_data],
-                    );
-                }
-                // Create the file manifest (dag-cbor array of chunk hashes).
-                let (manifest_data, mc) =
-                    dag::encode_file_manifest(&chunk_hashes, df.data.len() as u64);
-                let _ = self.db.execute(
-                    "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
-                    rusqlite::params![mc.to_bytes(), manifest_data],
-                );
-
-                // Build v1-2025 DAG (IPFS-compatible) from the assembled file.
+                // All chunk/manifest/block writes happen in ONE transaction so a crash
+                // mid-write cannot leave a partial file (some chunks but no manifest).
+                let Ok(mc) = self.store_released_file(&df.data, &chunks) else {
+                    reply.error(libc::EIO);
+                    return;
+                };
                 let v1_dag = dag::build_v1_2025_dag(&df.data);
-
-                for block in &v1_dag.blocks {
-                    let _ = self.db.execute(
-                        "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
-                        rusqlite::params![block.cid.to_bytes(), block.data],
-                    );
-                    let _ = self.db.execute(
-                        "INSERT OR IGNORE INTO block_index (v1_2025_cid, file_cid, block_offset, block_length) VALUES (?1, ?2, ?3, ?4)",
-                        rusqlite::params![block.cid.to_bytes(), mc.to_bytes(), block.file_offset as i64, block.data.len() as i64],
-                    );
-
-                    // Map backing CDC chunks for this v1-2025 block.
-                    let block_start = block.file_offset as usize;
-                    let block_end = block_start + block.data.len();
-                    for &(ref cdc_hash, cdc_start, cdc_end) in &cdc_spans {
-                        if cdc_end > block_start && cdc_start < block_end {
-                            let _ = self.db.execute(
-                                "INSERT OR IGNORE INTO block_chunks (v1_2025_cid, chunk_hash) VALUES (?1, ?2)",
-                                rusqlite::params![block.cid.to_bytes(), cdc_hash.to_vec()],
-                            );
-                        }
-                    }
-                }
 
                 if let Some(Entry::File {
                     manifest_cid,
