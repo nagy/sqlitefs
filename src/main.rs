@@ -1110,12 +1110,13 @@ impl fuser::Filesystem for SqliteFs {
         ino: u64,
         fh: u64,
         offset: i64,
-        _size: u32,
+        size: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
         // Read from dirty buffer if open and has data, otherwise from committed chunks.
+        // Never reply with more than the requested `size` bytes.
         if let Some(df) = self.open_files.get(&(ino, fh))
             && !df.data.is_empty()
         {
@@ -1124,18 +1125,19 @@ impl fuser::Filesystem for SqliteFs {
                 reply.data(&[]);
                 return;
             }
-            reply.data(&df.data[off..]);
+            let end = off.saturating_add(size as usize).min(df.data.len());
+            reply.data(&df.data[off..end]);
             return;
         }
         // Read committed file: resolve manifest → chunks → assemble.
         if let Some(Entry::File {
-            size,
+            size: file_size,
             manifest_cid: Some(cid),
             ..
         }) = self.entries.get(&ino)
         {
             let off = offset as usize;
-            if off >= *size as usize {
+            if off >= *file_size as usize {
                 reply.data(&[]);
                 return;
             }
@@ -1159,7 +1161,8 @@ impl fuser::Filesystem for SqliteFs {
                     }
                 }
                 if off < assembled.len() {
-                    reply.data(&assembled[off..]);
+                    let end = off.saturating_add(size as usize).min(assembled.len());
+                    reply.data(&assembled[off..end]);
                     return;
                 }
             }
