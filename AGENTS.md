@@ -73,11 +73,10 @@ The numbered list below is the single source of truth for what remains. When an 
 ### 1. Performance
 
 1. **Every mutation is O(entire repo)** — `mkdir`/`rmdir`/`unlink`/`rename`/`symlink`/`truncate` set `dirty_root = true` and immediately `commit_dirty_tree()`, which walks the full tree and rebuilds the entire snapshot tree from every ref. `cp -r` of many dirs is quadratic. Decide on one model: commit on a debounce/`fsync`, or lazily rebuild the snapshot tree on lookup.
-2. **`block_chunks` bloat for intermediates** — maps every v1-2025 block, including balanced-tree intermediate nodes, to all their backing chunks. Each intermediate's span is a union of leaf spans — redundant, ~8× the rows it needs (O(N log N) instead of O(N)). Only leaves are ever assembled; map just those.
 
 ### 2. Process & testing
 
-3. **No `fsck` command** — walk refs → verify DAG reachability, rebuild indexes. First real validation tool; also de-risks GC.
+2. **No `fsck` command** — walk refs → verify DAG reachability, rebuild indexes. First real validation tool; also de-risks GC.
 
 ## Rules for agents
 

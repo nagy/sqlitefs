@@ -625,7 +625,13 @@ impl SqliteFs {
                 rusqlite::params![block.cid.to_bytes(), mc.to_bytes(), block.file_offset as i64, block.data.len() as i64],
             );
 
-            // Map backing CDC chunks for this v1-2025 block.
+            // Map backing CDC chunks only for LEAF blocks (RAW codec). Intermediate
+            // dag-pb nodes cover the union of their children's spans, so mapping
+            // them would duplicate every leaf's rows (O(N^2/128) total); leaf rows
+            // are sufficient to assemble any block's content on demand.
+            if block.cid.codec() != dag::RAW {
+                continue;
+            }
             let block_start = block.file_offset as usize;
             let block_end = block_start + block.data.len();
             for &(ref cdc_hash, cdc_start, cdc_end) in &cdc_spans {
@@ -1647,6 +1653,52 @@ mod tests {
                 )
                 .unwrap();
             assert!(present, "chunk {} missing", hex(&h));
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// block_chunks must only map LEAF blocks — intermediate dag-pb nodes cover
+    /// the union of their children's spans and would duplicate every leaf's rows.
+    #[test]
+    fn test_block_chunks_leaves_only() {
+        let path = temp_db_path("block_chunks.db");
+        init_repo(&path).unwrap();
+        let mut fs = SqliteFs::open(&path).unwrap();
+
+        // > 1 MiB so the DAG has multiple leaves + at least one intermediate.
+        let data = vec![0x42u8; 3 * 1024 * 1024];
+        let chunks = cdc::chunk_file(&data);
+        let mc = fs.store_released_file(&data, &chunks).unwrap();
+
+        let dag = dag::build_v1_2025_dag(&data);
+        let leaf_cids: std::collections::HashSet<Vec<u8>> = dag
+            .blocks
+            .iter()
+            .filter(|b| b.cid.codec() == dag::RAW)
+            .map(|b| b.cid.to_bytes())
+            .collect();
+        assert!(
+            dag.blocks.iter().any(|b| b.cid.codec() != dag::RAW),
+            "test data should produce intermediate blocks"
+        );
+
+        // Every block_chunks row's v1_2025_cid must be a leaf.
+        let mut stmt = fs
+            .db
+            .prepare("SELECT DISTINCT v1_2025_cid FROM block_chunks")
+            .unwrap();
+        let rows: Vec<Vec<u8>> = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(!rows.is_empty(), "expected leaf rows in block_chunks");
+        for cid in &rows {
+            assert!(
+                leaf_cids.contains(cid),
+                "block_chunks contains non-leaf block"
+            );
         }
 
         let _ = std::fs::remove_file(&path);
