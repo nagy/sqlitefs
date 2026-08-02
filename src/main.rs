@@ -3,6 +3,7 @@ mod dag;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
@@ -1483,8 +1484,17 @@ impl fuser::Filesystem for SqliteFs {
 // ---------------------------------------------------------------------------
 
 fn mount_fs(db_path: &PathBuf, mount_point: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    // Take an exclusive flock on the DB file for the mount's lifetime so two
+    // processes can't mount the same repo concurrently (which would corrupt it).
+    let lock = std::fs::File::open(db_path)?;
+    let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!("repo is already mounted elsewhere: {err}").into());
+    }
+
     let fs = SqliteFs::open(db_path)?;
-    fuser::mount2(
+    let result = fuser::mount2(
         fs,
         mount_point,
         &[
@@ -1494,7 +1504,9 @@ fn mount_fs(db_path: &PathBuf, mount_point: &PathBuf) -> Result<(), Box<dyn std:
             MountOption::DefaultPermissions,
         ],
     )
-    .map_err(|e| format!("mount failed (is /dev/fuse accessible?): {e}").into())
+    .map_err(|e| format!("mount failed (is /dev/fuse accessible?): {e}").into());
+    // lock is released when it drops at end of scope
+    result
 }
 
 fn main() {
