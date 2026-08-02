@@ -412,14 +412,20 @@ impl SqliteFs {
         }
         let size = if dag::is_file_manifest(&data) {
             let mut total: u64 = 0;
-            if let Some(hashes) = dag::decode_file_manifest(&data) {
-                for h in &hashes {
-                    if let Ok(chunk_data) = db.query_row(
-                        "SELECT data FROM chunks WHERE hash = ?1",
-                        rusqlite::params![h.to_vec()],
-                        |r| r.get::<_, Vec<u8>>(0),
-                    ) {
-                        total += chunk_data.len() as u64;
+            if let Some((embedded_size, hashes)) = dag::decode_file_manifest(&data) {
+                match embedded_size {
+                    Some(sz) => total = sz,
+                    // Old format (no embedded size): sum chunk lengths.
+                    None => {
+                        for h in &hashes {
+                            if let Ok(chunk_data) = db.query_row(
+                                "SELECT data FROM chunks WHERE hash = ?1",
+                                rusqlite::params![h.to_vec()],
+                                |r| r.get::<_, Vec<u8>>(0),
+                            ) {
+                                total += chunk_data.len() as u64;
+                            }
+                        }
                     }
                 }
             }
@@ -533,7 +539,7 @@ impl SqliteFs {
     /// Empty files are real files — they need a manifest CID so `build_dir_dag` links
     /// them instead of skipping them (otherwise `touch foo` loses `foo` on commit).
     fn store_empty_manifest(&mut self) -> Vec<u8> {
-        let (manifest_data, mc) = dag::encode_file_manifest(&[]);
+        let (manifest_data, mc) = dag::encode_file_manifest(&[], 0);
         let _ = self.db.execute(
             "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
             rusqlite::params![mc.to_bytes(), manifest_data],
@@ -1034,7 +1040,8 @@ impl fuser::Filesystem for SqliteFs {
                     );
                 }
                 // Create the file manifest (dag-cbor array of chunk hashes).
-                let (manifest_data, mc) = dag::encode_file_manifest(&chunk_hashes);
+                let (manifest_data, mc) =
+                    dag::encode_file_manifest(&chunk_hashes, df.data.len() as u64);
                 let _ = self.db.execute(
                     "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
                     rusqlite::params![mc.to_bytes(), manifest_data],
@@ -1170,7 +1177,7 @@ impl fuser::Filesystem for SqliteFs {
                 reply.data(&[]);
                 return;
             };
-            if let Some(hashes) = dag::decode_file_manifest(&manifest_data) {
+            if let Some((_, hashes)) = dag::decode_file_manifest(&manifest_data) {
                 let mut assembled = Vec::new();
                 for h in &hashes {
                     if let Ok(chunk_data) = self.db.query_row(

@@ -255,16 +255,23 @@ fn cbor_bytes(data: &[u8], buf: &mut Vec<u8>) {
 // file manifest — CBOR array of chunk hashes
 // ---------------------------------------------------------------------------
 
-/// Encode a file manifest: CBOR array of 32-byte chunk hash blobs.
-pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]]) -> (Vec<u8>, Cid) {
+/// Encode a file manifest: CBOR array [<size-bytestring>, hash1, ..., hashN].
+/// The first element is the file size encoded as a byte string (1–8 bytes, never
+/// 32, so it is distinguishable from a chunk hash), followed by the 32-byte chunk
+/// hashes. Embedding the size means stat() never has to fetch chunk data.
+pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]], size: u64) -> (Vec<u8>, Cid) {
     let mut buf = Vec::new();
-    let n = chunk_hashes.len();
+    let n = chunk_hashes.len() + 1; // +1 for the size element
     if n <= 23 {
         buf.push(0x80 | n as u8);
     } else {
         buf.push(0x98);
         buf.push(n as u8);
     }
+    // Size as a byte string: encode the u64 in its minimal big-endian form.
+    let size_bytes = size.to_be_bytes();
+    let lead = size_bytes.iter().position(|&b| b != 0).unwrap_or(7);
+    cbor_bytes(&size_bytes[lead..], &mut buf);
     for hash in chunk_hashes {
         cbor_bytes(hash, &mut buf);
     }
@@ -312,9 +319,11 @@ pub fn is_file_manifest(data: &[u8]) -> bool {
     !data.is_empty() && data[0] >= 0x80 && data[0] <= 0x9f
 }
 
-/// Parse a file manifest CBOR array, returning chunk hashes.
-/// Returns None on parse failure.
-pub fn decode_file_manifest(data: &[u8]) -> Option<Vec<[u8; 32]>> {
+/// Parse a file manifest CBOR array, returning (size, chunk hashes).
+/// The size is `Some` when the manifest embeds it (new format: first element is a
+/// 1–8 byte string); `None` for the old format (all 32-byte elements are hashes,
+/// size must be computed by summing chunks). Returns None on parse failure.
+pub fn decode_file_manifest(data: &[u8]) -> Option<(Option<u64>, Vec<[u8; 32]>)> {
     if data.is_empty() {
         return None;
     }
@@ -323,8 +332,9 @@ pub fn decode_file_manifest(data: &[u8]) -> Option<Vec<[u8; 32]>> {
         0x98 => (data.get(1).copied()? as usize, 2),
         _ => return None,
     };
+    let mut size = None;
     let mut hashes = Vec::with_capacity(count);
-    for _ in 0..count {
+    for i in 0..count {
         let tag = *data.get(pos)?;
         let (len, tag_len): (usize, usize) = match tag {
             0x58 => (*data.get(pos + 1)? as usize, 2),
@@ -344,16 +354,26 @@ pub fn decode_file_manifest(data: &[u8]) -> Option<Vec<[u8; 32]>> {
             }
             _ => return None,
         };
-        if len != 32 {
-            return None;
-        }
         let start = pos + tag_len;
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(data.get(start..start + 32)?);
-        hashes.push(hash);
-        pos = start + 32;
+        if i == 0 && len != 32 {
+            // New format: first element is the size.
+            if len > 8 {
+                return None;
+            }
+            let mut sz = [0u8; 8];
+            sz[8 - len..].copy_from_slice(data.get(start..start + len)?);
+            size = Some(u64::from_be_bytes(sz));
+        } else {
+            if len != 32 {
+                return None;
+            }
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(data.get(start..start + 32)?);
+            hashes.push(hash);
+        }
+        pos = start + len;
     }
-    Some(hashes)
+    Some((size, hashes))
 }
 
 // ---------------------------------------------------------------------------
@@ -537,8 +557,9 @@ mod tests {
     #[test]
     fn test_file_manifest_roundtrip() {
         let chunk = [42u8; 32];
-        let (data, cid) = encode_file_manifest(&[chunk]);
-        let hashes = decode_file_manifest(&data).unwrap();
+        let (data, cid) = encode_file_manifest(&[chunk], 42);
+        let (size, hashes) = decode_file_manifest(&data).unwrap();
+        assert_eq!(size, Some(42));
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0], chunk);
         assert_eq!(cid.codec(), DAG_CBOR);
@@ -552,18 +573,32 @@ mod tests {
             h[0] = i;
             chunks.push(h);
         }
-        let (data, _) = encode_file_manifest(&chunks);
-        let decoded = decode_file_manifest(&data).unwrap();
+        let (data, _) = encode_file_manifest(&chunks, 123456789);
+        let (size, decoded) = decode_file_manifest(&data).unwrap();
+        assert_eq!(size, Some(123456789));
         assert_eq!(decoded.len(), 5);
         assert_eq!(decoded, chunks);
     }
 
     #[test]
     fn test_empty_file_manifest() {
-        let (data, _) = encode_file_manifest(&[]);
-        assert_eq!(data, vec![0x80]); // CBOR empty array
-        let decoded = decode_file_manifest(&data).unwrap();
+        let (data, _) = encode_file_manifest(&[], 0);
+        let (size, decoded) = decode_file_manifest(&data).unwrap();
+        assert_eq!(size, Some(0));
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_old_format_manifest_no_size() {
+        // Old format: array of 32-byte hashes only, no leading size element.
+        // First element is a 32-byte hash → size = None, all are hashes.
+        let chunk = [7u8; 32];
+        let mut buf = vec![0x81]; // array(1)
+        cbor_bytes(&chunk, &mut buf);
+        let (size, hashes) = decode_file_manifest(&buf).unwrap();
+        assert_eq!(size, None);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0], chunk);
     }
 
     #[test]
