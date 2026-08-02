@@ -171,21 +171,27 @@ fn encode_pb_wire_type(_wire: u8, tag: u64, buf: &mut Vec<u8>) {
 
 /// Encode a dag-cbor map: {parent: null_or_cid, tree: cid, timestamp: u64}
 /// parent_cid = None encodes as CBOR null.
+///
+/// Canonical dag-cbor: map keys sorted by (length, byte-order) — tree (4),
+/// parent (6), timestamp (9) — and CIDs as tag-42 byte strings (RFC 7049 §3.9,
+/// IPLD dag-cbor spec). Bare bytes would parse but produce a non-canonical CID.
 pub fn encode_commit(parent_cid: Option<&[u8]>, tree_cid: &[u8], timestamp: u64) -> (Vec<u8>, Cid) {
     let mut buf = Vec::new();
     // CBOR map with 3 items
     let num_items = if parent_cid.is_some() { 3 } else { 2 };
     buf.push(0xa0 | num_items);
 
-    if let Some(pcid) = parent_cid {
-        // "parent" (6 bytes)
-        cbor_string("parent", &mut buf);
-        cbor_bytes(pcid, &mut buf);
-    }
+    // Keys in canonical order: "tree" (4) < "parent" (6) < "timestamp" (9)
 
     // "tree" (4 bytes)
     cbor_string("tree", &mut buf);
-    cbor_bytes(tree_cid, &mut buf);
+    cbor_cid(tree_cid, &mut buf);
+
+    if let Some(pcid) = parent_cid {
+        // "parent" (6 bytes)
+        cbor_string("parent", &mut buf);
+        cbor_cid(pcid, &mut buf);
+    }
 
     // "timestamp" (9 bytes)
     cbor_string("timestamp", &mut buf);
@@ -208,6 +214,13 @@ pub fn encode_commit(parent_cid: Option<&[u8]>, tree_cid: &[u8], timestamp: u64)
 
     let cid = Cid::hash_dag_cbor(&buf);
     (buf, cid)
+}
+
+/// Encode a CID as a dag-cbor tagged byte string: tag 42 (0xd8 0x2a) + bytes.
+fn cbor_cid(data: &[u8], buf: &mut Vec<u8>) {
+    buf.push(0xd8);
+    buf.push(0x2a);
+    cbor_bytes(data, buf);
 }
 
 fn cbor_string(s: &str, buf: &mut Vec<u8>) {
@@ -483,13 +496,42 @@ mod tests {
     #[test]
     fn test_commit_roundtrip() {
         let (_tree_data, tree_cid) = empty_dir();
-        let (cbor, commit_cid) = encode_commit(None, &tree_cid.to_bytes(), 1700000000);
+        let tree_bytes = tree_cid.to_bytes();
+        let (cbor, commit_cid) = encode_commit(None, &tree_bytes, 1700000000);
         // CID prefix: 01 71 12 20
         let cid_bytes = commit_cid.to_bytes();
         assert_eq!(&cid_bytes[0..4], &[0x01, 0x71, 0x12, 0x20]);
         assert_eq!(cid_bytes.len(), 4 + 32);
         // Verify CBOR starts with map(2)
         assert_eq!(cbor[0] & 0xf0, 0xa0);
+        // Canonical key order: tree (len 4) before parent (len 6) before timestamp (len 9).
+        // With no parent, first key must be "tree". cbor[1] = 0x64 (text string len 4).
+        assert_eq!(cbor[1], 0x64);
+        assert_eq!(&cbor[2..6], b"tree");
+        // tree CID is a tag-42 byte string: 0xd8 0x2a then byte-string length then CID bytes.
+        // 36-byte CID > 23, so length is two bytes: 0x58 0x24.
+        assert_eq!(cbor[6], 0xd8);
+        assert_eq!(cbor[7], 0x2a);
+        assert_eq!(cbor[8], 0x58);
+        assert_eq!(cbor[9], 36); // 4-byte prefix + 32-byte hash
+        assert_eq!(&cbor[10..10 + tree_bytes.len()], &tree_bytes[..]);
+    }
+
+    #[test]
+    fn test_commit_key_order_with_parent() {
+        let (_tree_data, tree_cid) = empty_dir();
+        let tree_bytes = tree_cid.to_bytes();
+        let (cbor, _) = encode_commit(Some(&tree_bytes), &tree_bytes, 1);
+        // Canonical order: "tree" then "parent" then "timestamp".
+        assert_eq!(cbor[1], 0x64);
+        assert_eq!(&cbor[2..6], b"tree");
+        // After tree key (1+1+4) + tag42 (2) + len (0x58 0x24 = 2) + cid (36),
+        // next key is "parent".
+        let parent_key_off = 1 + 1 + 4 + 2 + 2 + 36;
+        assert_eq!(cbor[parent_key_off], 0x66); // text string len 6
+        assert_eq!(&cbor[parent_key_off + 1..parent_key_off + 7], b"parent");
+        assert_eq!(cbor[parent_key_off + 7], 0xd8);
+        assert_eq!(cbor[parent_key_off + 8], 0x2a);
     }
 
     #[test]

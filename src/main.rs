@@ -1386,10 +1386,12 @@ impl fuser::Filesystem for SqliteFs {
         reply.data(b"");
     }
 
-    fn forget(&mut self, _req: &Request, ino: u64, _nlookup: u64) {
-        if ino > SNAPSHOT_HASH_INODE {
-            self.entries.remove(&ino);
-        }
+    fn forget(&mut self, _req: &Request, _ino: u64, _nlookup: u64) {
+        // No-op. The kernel will never send another request referencing a forgotten
+        // inode (unless it is re-looked-up), so there is no need to evict it.
+        // Evicting would corrupt the parent's `children` map (a name would point at
+        // a missing Entry), causing lookup ENOENT, mkdir EEXIST, and readdir panics
+        // (self.entries[&child_ino]). The whole tree is resident in `entries` anyway.
     }
 }
 
