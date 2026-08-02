@@ -215,10 +215,57 @@ impl SqliteFs {
         let mut entries = HashMap::new();
 
         // Wire up root directory (writable) + .sqlitefs/ (read-only snapshot tree).
+        // Load the persisted 'main' ref tree into the writable root so that
+        // remounting restores the working tree (not just the snapshot dir).
+        let mut root_children = HashMap::from([(".sqlitefs".into(), SNAPSHOT_DIR_INODE)]);
+        if let Ok(Some(main_commit)) = db.query_row(
+            "SELECT commit_hash FROM refs WHERE name = 'main'",
+            [],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        ) && let Ok(main_tree) = db.query_row(
+            "SELECT tree_cid FROM commits WHERE hash = ?1",
+            rusqlite::params![main_commit],
+            |r| r.get::<_, Vec<u8>>(0),
+        ) {
+            // Load persisted dirs/files into the root, excluding the snapshot dir.
+            let child_rows: Vec<(String, Vec<u8>)> = db
+                .prepare("SELECT name, child_cid FROM directory_index WHERE parent_cid = ?1")
+                .ok()
+                .map(|mut cs| {
+                    cs.query_map(rusqlite::params![main_tree], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                    })
+                    .ok()
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+                    .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            for (child_name, child_cid) in child_rows {
+                if child_name == ".sqlitefs" {
+                    continue;
+                }
+                let child_ino = match Self::child_entry_from_cid(&db, &child_cid) {
+                    Entry::Dir { .. } => Self::load_dir_recursive(
+                        &db,
+                        &mut ino_gen,
+                        &mut entries,
+                        &child_cid,
+                        ROOT_INODE,
+                    ),
+                    entry => {
+                        let child_ino = ino_gen.next();
+                        entries.insert(child_ino, entry);
+                        child_ino
+                    }
+                };
+                root_children.insert(child_name, child_ino);
+            }
+        }
+
         entries.insert(
             ROOT_INODE,
             Entry::Dir {
-                children: HashMap::from([(".sqlitefs".into(), SNAPSHOT_DIR_INODE)]),
+                children: root_children,
                 parent: ROOT_INODE,
             },
         );
@@ -289,35 +336,63 @@ impl SqliteFs {
                 rusqlite::params![commit_hash],
                 |r| r.get(0),
             )?;
-            let mut dir_children = HashMap::new();
-            let mut cs =
-                db.prepare("SELECT name, child_cid FROM directory_index WHERE parent_cid = ?1")?;
-            let child_rows: Vec<(String, Vec<u8>)> = cs
-                .query_map(rusqlite::params![tree_cid], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
-                })?
-                .filter_map(Result::ok)
-                .collect();
-            for (child_name, child_cid) in child_rows {
-                let ino = ino_gen.next();
-                let entry = Self::child_entry_from_cid(db, &child_cid);
-                entries.insert(ino, entry);
-                dir_children.insert(child_name, ino);
-            }
-            let ref_ino = ino_gen.next();
-            entries.insert(
-                ref_ino,
-                Entry::Dir {
-                    children: dir_children,
-                    parent: SNAPSHOT_REFS_INODE,
-                },
-            );
+            let ref_ino =
+                Self::load_dir_recursive(db, ino_gen, entries, &tree_cid, SNAPSHOT_REFS_INODE);
             refs_children.insert(name, ref_ino);
         }
         Ok(refs_children)
     }
 
-    /// Load a child CID from chunks — returns a File or Symlink entry.
+    /// Recursively load a directory from directory_index, building Entry trees.
+    fn load_dir_recursive(
+        db: &rusqlite::Connection,
+        ino_gen: &mut InoGen,
+        entries: &mut HashMap<u64, Entry>,
+        parent_cid: &[u8],
+        parent_inode: u64,
+    ) -> u64 {
+        let ino = ino_gen.next();
+        let mut children = HashMap::new();
+
+        let mut cs = db
+            .prepare("SELECT name, child_cid FROM directory_index WHERE parent_cid = ?1")
+            .ok();
+        if let Some(ref mut cs) = cs {
+            let child_rows: Vec<(String, Vec<u8>)> = cs
+                .query_map(rusqlite::params![parent_cid], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })
+                .ok()
+                .map(|rows| rows.filter_map(Result::ok).collect())
+                .unwrap_or_default();
+
+            for (child_name, child_cid) in child_rows {
+                let child_ino = match Self::child_entry_from_cid(db, &child_cid) {
+                    Entry::Dir { .. } => {
+                        // Recurse into subdirectories.
+                        Self::load_dir_recursive(db, ino_gen, entries, &child_cid, ino)
+                    }
+                    entry => {
+                        let child_ino = ino_gen.next();
+                        entries.insert(child_ino, entry);
+                        child_ino
+                    }
+                };
+                children.insert(child_name, child_ino);
+            }
+        }
+
+        entries.insert(
+            ino,
+            Entry::Dir {
+                children,
+                parent: parent_inode,
+            },
+        );
+        ino
+    }
+
+    /// Load a child CID from chunks — returns a File, Dir, or Symlink entry.
     fn child_entry_from_cid(db: &rusqlite::Connection, cid: &[u8]) -> Entry {
         let data: Vec<u8> = db
             .query_row(
@@ -328,6 +403,12 @@ impl SqliteFs {
             .unwrap_or_default();
         if let Some(target) = dag::decode_symlink(&data) {
             return Entry::Symlink { target };
+        }
+        if dag::is_dir_dag(&data) {
+            return Entry::Dir {
+                children: HashMap::new(),
+                parent: 0, // filled in by load_dir_recursive
+            };
         }
         let size = if dag::is_file_manifest(&data) {
             let mut total: u64 = 0;
@@ -379,32 +460,7 @@ impl SqliteFs {
         }
         let (_commit_hash, tree_cid, _timestamp) = &rows[0];
 
-        // Build directory tree from directory_index.
-        let mut dir_children = HashMap::new();
-        let mut cs = db
-            .prepare("SELECT name, child_cid FROM directory_index WHERE parent_cid = ?1")
-            .ok()?;
-        let child_rows: Vec<(String, Vec<u8>)> = cs
-            .query_map(rusqlite::params![tree_cid], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
-            })
-            .ok()?
-            .filter_map(Result::ok)
-            .collect();
-        for (child_name, child_cid) in child_rows {
-            let ino = ino_gen.next();
-            let entry = Self::child_entry_from_cid(db, &child_cid);
-            entries.insert(ino, entry);
-            dir_children.insert(child_name, ino);
-        }
-        let dir_ino = ino_gen.next();
-        entries.insert(
-            dir_ino,
-            Entry::Dir {
-                children: dir_children,
-                parent,
-            },
-        );
+        let dir_ino = Self::load_dir_recursive(db, ino_gen, entries, tree_cid, parent);
         Some(dir_ino)
     }
 
@@ -677,7 +733,13 @@ impl fuser::Filesystem for SqliteFs {
                 *s = 0;
                 *manifest_cid = None;
                 *v1_2025_cid = None;
-                self.open_files.retain(|&(i, _), _| i != ino);
+                // Clear any open file buffers for this inode (don't remove them;
+                // a write may follow from the same open file handle, e.g. echo > file).
+                for ((i, _), df) in self.open_files.iter_mut() {
+                    if *i == ino {
+                        df.data.clear();
+                    }
+                }
                 self.dirty_root = true;
                 if self.dirty_root {
                     let _ = self.commit_dirty_tree();
@@ -1053,8 +1115,10 @@ impl fuser::Filesystem for SqliteFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        // Read from dirty buffer if open, otherwise from committed chunks.
-        if let Some(df) = self.open_files.get(&(ino, fh)) {
+        // Read from dirty buffer if open and has data, otherwise from committed chunks.
+        if let Some(df) = self.open_files.get(&(ino, fh))
+            && !df.data.is_empty()
+        {
             let off = offset as usize;
             if off >= df.data.len() {
                 reply.data(&[]);

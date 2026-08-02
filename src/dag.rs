@@ -288,6 +288,12 @@ pub fn decode_symlink(data: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(target).into_owned())
 }
 
+/// Peek at a chunk data blob and return true if it's a dag-pb directory node.
+pub fn is_dir_dag(data: &[u8]) -> bool {
+    // dag-pb: field 1 (Data) = 0x0a <len> <unixfs_type: 0x08, 0x01>
+    data.len() >= 4 && data[0] == 0x0a && data[1] >= 2 && data[2] == 0x08 && data[3] == 0x01
+}
+
 /// Peek at a chunk data blob and return true if it's a file manifest (dag-cbor array).
 pub fn is_file_manifest(data: &[u8]) -> bool {
     !data.is_empty() && data[0] >= 0x80 && data[0] <= 0x9f

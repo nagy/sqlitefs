@@ -64,17 +64,7 @@ See `docs/adr/` for the full record. Summary:
 - **Auto-commit**: every 60s if dirty, checked on `lookup`/`create`/`open`
 - **Manual named snapshot**: `touch .sqlitefs/tag/<name>` creates a named ref
 - **Snapshot browsing**: `.sqlitefs/refs/<name>/` (hidden from readdir)
-- **Hash access** (`.sqlitefs/c/<hash>/`): not yet implemented
-
-## Remaining work
-
-- **`.sqlitefs/c/<hash-prefix>/`** — ✓ (prefix lookup in commits table, cached)
-- **`setattr`** — ~~truncate-to-zero~~ ✓ | chmod, utimes — still not implemented
-- **GC** — delete unreachable chunks, user-initiated VACUUM
-- **Symlinks in DAG** — ✓ (dag-pb UnixFS type Symlink, roundtrips through chunks)
-- **Recursive snapshot tree refresh on `rename`/`rmdir`/`mkdir`** — ✓ (auto-commit rebuilds snapshot tree)
-- **NixOS VM test** — like nixfs has
-- **v1-2025 CID interop validation** — compare against ipfs-chainer / Kubo output
+- **Hash access** (`.sqlitefs/c/<hash-prefix>/`): ✓ (prefix lookup in commits table, cached)
 
 ## Rules for agents
 
