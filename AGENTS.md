@@ -70,28 +70,23 @@ See `docs/adr/` for the full record. Summary:
 
 The numbered list below is the single source of truth for what remains. When an entry is finished, **remove it entirely** — never cross out, never mark done.
 
-### 1. Correctness
+### 1. Performance
 
-1. **`block_index` can't represent dedup** — keyed on `v1_2025_cid` alone, so two files sharing a leaf at different offsets collide and the second row is silently dropped (`INSERT OR IGNORE`). Key it `(file_cid, v1_2025_cid)`, or drop the table (declared a rebuildable view).
+1. **Every mutation is O(entire repo)** — `mkdir`/`rmdir`/`unlink`/`rename`/`symlink`/`truncate` set `dirty_root = true` and immediately `commit_dirty_tree()`, which walks the full tree and rebuilds the entire snapshot tree from every ref. `cp -r` of many dirs is quadratic. Decide on one model: commit on a debounce/`fsync`, or lazily rebuild the snapshot tree on lookup.
+2. **`block_chunks` bloat for intermediates** — maps every v1-2025 block, including balanced-tree intermediate nodes, to all their backing chunks. Each intermediate's span is a union of leaf spans — redundant, ~8× the rows it needs (O(N log N) instead of O(N)). Only leaves are ever assembled; map just those.
 
-### 2. Performance
+### 2. Durability & consistency
 
-2. **Every mutation is O(entire repo)** — `mkdir`/`rmdir`/`unlink`/`rename`/`symlink`/`truncate` set `dirty_root = true` and immediately `commit_dirty_tree()`, which walks the full tree and rebuilds the entire snapshot tree from every ref. `cp -r` of many dirs is quadratic. Decide on one model: commit on a debounce/`fsync`, or lazily rebuild the snapshot tree on lookup.
-3. **`read` assembles the entire file** — O(filesize) memory per read on the committed path. Assemble only the chunk span covering `[offset, offset+size)`.
-4. **`block_chunks` bloat for intermediates** — maps every v1-2025 block, including balanced-tree intermediate nodes, to all their backing chunks. Each intermediate's span is a union of leaf spans — redundant, ~8× the rows it needs (O(N log N) instead of O(N)). Only leaves are ever assembled; map just those.
+3. **No transactions anywhere** — every commit path (`commit_as_ref`, `release`) is a series of autocommit `execute()` calls; a crash mid-commit leaves orphan rows. Wrap each commit in a SQLite transaction (also makes chunks-before-refs ordering atomic).
+4. **WAL mode** — `Connection::open` defaults to the rollback journal. Use `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL` for an embedded DB behind a FUSE writer.
+5. **No double-mount protection** — two `mount` processes on the same `.db` will corrupt it. `flock` on the db file (or a lock table row) in `SqliteFs::open`.
 
-### 3. Durability & consistency
+### 3. Process & testing
 
-5. **No transactions anywhere** — every commit path (`commit_as_ref`, `release`) is a series of autocommit `execute()` calls; a crash mid-commit leaves orphan rows. Wrap each commit in a SQLite transaction (also makes chunks-before-refs ordering atomic).
-6. **WAL mode** — `Connection::open` defaults to the rollback journal. Use `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL` for an embedded DB behind a FUSE writer.
-7. **No double-mount protection** — two `mount` processes on the same `.db` will corrupt it. `flock` on the db file (or a lock table row) in `SqliteFs::open`.
-
-### 4. Process & testing
-
-8. **`main.rs` has zero tests** — the largest, most logic-heavy file. The DAG/CDC layers are well tested; the commit → rebuild → read round-trip isn't. Add DB-level integration tests (no FUSE needed): write chunks, commit, reopen, verify tree/read.
-9. **No `fsck` command** — walk refs → verify DAG reachability, rebuild indexes. First real validation tool; also de-risks GC.
-10. **Missing `DefaultPermissions` mount option** — without it the kernel doesn't enforce the 0644/0755 mode bits, so anything is writable by anyone with mount access.
-11. **Run the NixOS VM test with a debug build** — `default.nix`'s `buildRustPackage` defaults `cargoBuildType` to `release`, so `debug_assert!`s (in our code or in fuser's) are compiled out in the test. Switch the test to a debug build (`cargoBuildType = "debug"` or a separate test derivation) so future `debug_assert!`s are actually exercised. Note: fuser's existing asserts on WRITE/SETXATTR sizes and readdir buffers are unconditional `assert!`s (fire in release too); the read-reply path has no assert — consider adding a `debug_assert` for reply length ≤ requested size.
+6. **`main.rs` has zero tests** — the largest, most logic-heavy file. The DAG/CDC layers are well tested; the commit → rebuild → read round-trip isn't. Add DB-level integration tests (no FUSE needed): write chunks, commit, reopen, verify tree/read.
+7. **No `fsck` command** — walk refs → verify DAG reachability, rebuild indexes. First real validation tool; also de-risks GC.
+8. **Missing `DefaultPermissions` mount option** — without it the kernel doesn't enforce the 0644/0755 mode bits, so anything is writable by anyone with mount access.
+9. **Run the NixOS VM test with a debug build** — `default.nix`'s `buildRustPackage` defaults `cargoBuildType` to `release`, so `debug_assert!`s (in our code or in fuser's) are compiled out in the test. Switch the test to a debug build (`cargoBuildType = "debug"` or a separate test derivation) so future `debug_assert!`s are actually exercised. Note: fuser's existing asserts on WRITE/SETXATTR sizes and readdir buffers are unconditional `assert!`s (fire in release too); the read-reply path has no assert — consider adding a `debug_assert` for reply length ≤ requested size.
 
 ## Rules for agents
 
