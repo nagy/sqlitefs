@@ -63,6 +63,8 @@ enum Command {
         db_path: PathBuf,
         mount_point: PathBuf,
     },
+    /// Verify repository integrity: every CID reachable from a ref resolves.
+    Fsck { db_path: PathBuf },
 }
 
 fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -150,6 +152,128 @@ fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         &hash_hex[..8]
     );
     Ok(())
+}
+
+/// Verify repository integrity: every CID reachable from a ref (commit, tree,
+/// dir, symlink, file manifest, chunk) must resolve in the chunks table.
+/// Prints each problem and returns Err if any are found. Also the foundation
+/// for GC: chunks reachable from refs are exactly the live set.
+fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let db = rusqlite::Connection::open(db_path)?;
+    let mut errors: Vec<String> = Vec::new();
+    let mut visited: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
+    let chunk_exists = |cid: &[u8], db: &rusqlite::Connection| -> bool {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE hash = ?1)",
+            rusqlite::params![cid],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            != 0
+    };
+
+    // Walk a directory tree: verify the dir chunk and every child link exists.
+    fn walk_tree(
+        db: &rusqlite::Connection,
+        cid: &[u8],
+        errors: &mut Vec<String>,
+        visited: &mut std::collections::HashSet<Vec<u8>>,
+        chunk_exists: &dyn Fn(&[u8], &rusqlite::Connection) -> bool,
+    ) {
+        if !visited.insert(cid.to_vec()) {
+            return;
+        }
+        if !chunk_exists(cid, db) {
+            errors.push(format!("missing chunk for tree node {}", hex_cid(cid)));
+            return;
+        }
+        let Ok(data) = db.query_row(
+            "SELECT data FROM chunks WHERE hash = ?1",
+            rusqlite::params![cid],
+            |r| r.get::<_, Vec<u8>>(0),
+        ) else {
+            return;
+        };
+        // Symlink: nothing further to verify.
+        if dag::decode_symlink(&data).is_some() {
+            return;
+        }
+        // File manifest: verify every chunk hash resolves.
+        if dag::is_file_manifest(&data) {
+            if let Some((_, hashes)) = dag::decode_file_manifest(&data) {
+                for h in &hashes {
+                    if !chunk_exists(h, db) {
+                        errors.push(format!(
+                            "file {} references missing chunk {}",
+                            hex_cid(cid),
+                            hex_cid(h)
+                        ));
+                    }
+                }
+            }
+            return;
+        }
+        // Directory: recurse into links.
+        if let Some(links) = dag::decode_dir_links(&data) {
+            for (_name, child_cid) in links {
+                walk_tree(db, &child_cid, errors, visited, chunk_exists);
+            }
+        }
+    }
+
+    // For each ref, walk the commit chain then the tree.
+    let mut stmt = db.prepare("SELECT name, commit_hash FROM refs")?;
+    let refs: Vec<(String, Vec<u8>)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    for (name, commit_hash) in refs {
+        let mut current = Some(commit_hash);
+        let mut chain: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        while let Some(hash) = current {
+            if !chain.insert(hash.clone()) {
+                errors.push(format!("ref {name}: commit cycle detected"));
+                break;
+            }
+            if !chunk_exists(&hash, &db) {
+                errors.push(format!("ref {name}: missing commit {}", hex_cid(&hash)));
+                break;
+            }
+            let row: Option<(Option<Vec<u8>>, Vec<u8>)> = db
+                .query_row(
+                    "SELECT parent, tree_cid FROM commits WHERE hash = ?1",
+                    rusqlite::params![hash],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            let Some((parent, tree_cid)) = row else {
+                errors.push(format!(
+                    "ref {name}: commit {} not in commits table",
+                    hex_cid(&hash)
+                ));
+                break;
+            };
+            walk_tree(&db, &tree_cid, &mut errors, &mut visited, &chunk_exists);
+            current = parent;
+        }
+    }
+
+    if errors.is_empty() {
+        println!("fsck: OK — all refs, commits and reachable objects resolve.");
+        Ok(())
+    } else {
+        for e in &errors {
+            eprintln!("fsck: {e}");
+        }
+        Err(format!("fsck: {} problem(s) found", errors.len()).into())
+    }
+}
+
+/// Format a CID's bytes as hex for error messages.
+fn hex_cid(cid: &[u8]) -> String {
+    cid.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1524,6 +1648,7 @@ fn main() {
             db_path,
             mount_point,
         } => mount_fs(&db_path, &mount_point),
+        Command::Fsck { db_path } => fsck_repo(&db_path),
     };
 
     if let Err(e) = result {

@@ -127,6 +127,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
           machine.succeed("test -f /tmp/mnt/.sqlitefs/refs/test-snap/subdir/renamed.txt")
           machine.succeed("grep 'hello' /tmp/mnt/.sqlitefs/refs/test-snap/subdir/renamed.txt")
 
+          # ---- fsck after all ops (repo must be healthy) ----
+          machine.succeed("sqlitefs fsck /tmp/repo/test.db")
+
           # ---- clean up ----
           machine.succeed("fusermount3 -u /tmp/mnt")
         '';

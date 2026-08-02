@@ -314,6 +314,79 @@ pub fn is_dir_dag(data: &[u8]) -> bool {
     data.len() >= 4 && data[0] == 0x0a && data[1] >= 2 && data[2] == 0x08 && data[3] == 0x01
 }
 
+/// Decode the Links of a dag-pb node into (name, cid_bytes) pairs.
+/// Returns None on parse failure. Matches the format produced by `dir_with_links`:
+/// repeated field 2 (0x12) messages, each containing hash (field 1), name
+/// (field 2), tsize (field 3).
+pub fn decode_dir_links(data: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    let mut pos = 0usize;
+    let mut links = Vec::new();
+    while pos < data.len() {
+        let tag = *data.get(pos)?;
+        let field = tag >> 3;
+        let wire = tag & 0x07;
+        pos += 1;
+        match (field, wire) {
+            (2, 2) => {
+                // length-delimited link message
+                let (len, adv) = decode_uvarint(data.get(pos..)?)?;
+                pos += adv;
+                let msg = data.get(pos..pos + len)?;
+                pos += len;
+                let mut hash: Option<Vec<u8>> = None;
+                let mut name: String = String::new();
+                let mut mp = 0usize;
+                while mp < msg.len() {
+                    let mtag = *msg.get(mp)?;
+                    let mfield = mtag >> 3;
+                    let mwire = mtag & 0x07;
+                    mp += 1;
+                    match (mfield, mwire) {
+                        (1, 2) => {
+                            let (l, a) = decode_uvarint(msg.get(mp..)?)?;
+                            mp += a;
+                            hash = Some(msg.get(mp..mp + l)?.to_vec());
+                            mp += l;
+                        }
+                        (2, 2) => {
+                            let (l, a) = decode_uvarint(msg.get(mp..)?)?;
+                            mp += a;
+                            name = String::from_utf8_lossy(msg.get(mp..mp + l)?).into_owned();
+                            mp += l;
+                        }
+                        (3, 0) => {
+                            let (_, a) = decode_uvarint(msg.get(mp..)?)?;
+                            mp += a;
+                        }
+                        _ => return None,
+                    }
+                }
+                links.push((name, hash?));
+            }
+            (1, 2) => {
+                // Data field — skip
+                let (len, adv) = decode_uvarint(data.get(pos..)?)?;
+                pos += adv + len;
+            }
+            _ => return None,
+        }
+    }
+    Some(links)
+}
+
+fn decode_uvarint(data: &[u8]) -> Option<(usize, usize)> {
+    let mut v: usize = 0;
+    let mut shift = 0u32;
+    for (i, &b) in data.iter().take(10).enumerate() {
+        v |= ((b & 0x7f) as usize) << shift;
+        if b & 0x80 == 0 {
+            return Some((v, i + 1));
+        }
+        shift += 7;
+    }
+    None
+}
+
 /// Peek at a chunk data blob and return true if it's a file manifest (dag-cbor array).
 pub fn is_file_manifest(data: &[u8]) -> bool {
     !data.is_empty() && data[0] >= 0x80 && data[0] <= 0x9f
@@ -504,6 +577,27 @@ mod tests {
         let cid_bytes = cid.to_bytes();
         assert_eq!(&cid_bytes[0..4], &[0x01, 0x70, 0x12, 0x20]);
         assert_eq!(cid_bytes.len(), 4 + 32);
+    }
+
+    #[test]
+    fn test_decode_dir_links_roundtrip() {
+        let (data, _) = dir_with_links(&[
+            ("a.txt", &[1u8; 36]),
+            ("sub", &[2u8; 36]),
+            ("empty", &[3u8; 36]),
+        ]);
+        let links = decode_dir_links(&data).unwrap();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0], ("a.txt".to_string(), vec![1u8; 36]));
+        assert_eq!(links[1], ("sub".to_string(), vec![2u8; 36]));
+        assert_eq!(links[2], ("empty".to_string(), vec![3u8; 36]));
+    }
+
+    #[test]
+    fn test_decode_dir_links_empty() {
+        let (data, _) = empty_dir();
+        let links = decode_dir_links(&data).unwrap();
+        assert!(links.is_empty());
     }
 
     #[test]
