@@ -94,10 +94,11 @@ fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         ) STRICT;
 
         CREATE TABLE block_index (
-            v1_2025_cid BLOB PRIMARY KEY,
+            v1_2025_cid BLOB NOT NULL,
             file_cid    BLOB NOT NULL,
             block_offset INTEGER NOT NULL,
-            block_length INTEGER NOT NULL
+            block_length INTEGER NOT NULL,
+            PRIMARY KEY (file_cid, v1_2025_cid)
         ) STRICT;
 
         CREATE TABLE block_chunks (
