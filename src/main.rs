@@ -1178,21 +1178,43 @@ impl fuser::Filesystem for SqliteFs {
                 return;
             };
             if let Some((_, hashes)) = dag::decode_file_manifest(&manifest_data) {
+                // Assemble only the chunks overlapping [off, end), not the whole file.
+                // Walk cumulative offsets using cheap length() queries; fetch full
+                // data only for chunks that intersect the requested window.
+                let end = off.saturating_add(size as usize);
                 let mut assembled = Vec::new();
+                let mut pos: usize = 0;
                 for h in &hashes {
+                    let Ok(len) = self.db.query_row(
+                        "SELECT length(data) FROM chunks WHERE hash = ?1",
+                        rusqlite::params![h.to_vec()],
+                        |r| r.get::<_, i64>(0),
+                    ) else {
+                        // Missing chunk: skip (best effort, matches old behavior).
+                        continue;
+                    };
+                    let len = len.max(0) as usize;
+                    let chunk_start = pos;
+                    let chunk_end = pos + len;
+                    pos = chunk_end;
+                    if chunk_end <= off || chunk_start >= end {
+                        continue;
+                    }
                     if let Ok(chunk_data) = self.db.query_row(
                         "SELECT data FROM chunks WHERE hash = ?1",
                         rusqlite::params![h.to_vec()],
                         |r| r.get::<_, Vec<u8>>(0),
                     ) {
-                        assembled.extend_from_slice(&chunk_data);
+                        let s = off.saturating_sub(chunk_start).min(len);
+                        let e = end.saturating_sub(chunk_start).min(len);
+                        assembled.extend_from_slice(&chunk_data[s..e]);
+                    }
+                    if pos >= end {
+                        break;
                     }
                 }
-                if off < assembled.len() {
-                    let end = off.saturating_add(size as usize).min(assembled.len());
-                    reply.data(&assembled[off..end]);
-                    return;
-                }
+                reply.data(&assembled);
+                return;
             }
         }
         reply.data(&[]);
