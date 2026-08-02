@@ -630,6 +630,15 @@ impl SqliteFs {
     }
 
     /// Auto-commit if dirty and interval elapsed. Called from every FUSE op.
+    /// Record that the tree changed and reset the debounce timer.
+    fn mark_dirty(&mut self) {
+        self.dirty_root = true;
+        self.last_auto_commit = std::time::Instant::now();
+    }
+
+    /// Debounced auto-commit: commit if dirty and no mutation for 60s.
+    /// Called from lookup/create/open — a long-running bulk copy keeps bumping
+    /// the timer via mark_dirty, so we commit once after it settles, not per op.
     fn maybe_auto_commit(&mut self) {
         if !self.dirty_root {
             return;
@@ -852,6 +861,13 @@ impl SqliteFs {
 // ---------------------------------------------------------------------------
 
 impl fuser::Filesystem for SqliteFs {
+    /// Called on unmount: persist any dirty state so nothing is lost.
+    fn destroy(&mut self) {
+        if self.dirty_root {
+            let _ = self.commit_dirty_tree();
+        }
+    }
+
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         self.maybe_auto_commit();
         let Some(name_str) = name.to_str() else {
@@ -985,9 +1001,7 @@ impl fuser::Filesystem for SqliteFs {
                     }
                 }
                 self.dirty_root = true;
-                if self.dirty_root {
-                    let _ = self.commit_dirty_tree();
-                }
+                self.mark_dirty();
             }
             // ponytail: non-zero truncation on committed files not implemented
         }
@@ -1041,9 +1055,7 @@ impl fuser::Filesystem for SqliteFs {
             },
         );
         self.dirty_root = true;
-        if self.dirty_root {
-            let _ = self.commit_dirty_tree();
-        }
+        self.mark_dirty();
         reply.entry(
             &std::time::Duration::MAX,
             &make_attr(ino, FileType::Directory, 0),
@@ -1091,9 +1103,7 @@ impl fuser::Filesystem for SqliteFs {
         children.remove(name_str);
         self.entries.remove(&ino);
         self.dirty_root = true;
-        if self.dirty_root {
-            let _ = self.commit_dirty_tree();
-        }
+        self.mark_dirty();
         reply.ok();
     }
 
@@ -1269,10 +1279,9 @@ impl fuser::Filesystem for SqliteFs {
                 }
             }
             self.dirty_root = true;
-            // Auto-commit after every file release that wrote data.
-            if self.dirty_root {
-                let _ = self.commit_dirty_tree();
-            }
+            // Commit is debounced: the auto-commit timer, a flush/fsync, or unmount
+            // persists the write. Committing here would be O(entire repo) per op.
+            self.mark_dirty();
         }
         reply.ok();
     }
@@ -1311,9 +1320,7 @@ impl fuser::Filesystem for SqliteFs {
         children.remove(name_str);
         self.entries.remove(&ino);
         self.dirty_root = true;
-        if self.dirty_root {
-            let _ = self.commit_dirty_tree();
-        }
+        self.mark_dirty();
         reply.ok();
     }
 
@@ -1453,9 +1460,7 @@ impl fuser::Filesystem for SqliteFs {
             },
         );
         self.dirty_root = true;
-        if self.dirty_root {
-            let _ = self.commit_dirty_tree();
-        }
+        self.mark_dirty();
         reply.entry(
             &std::time::Duration::MAX,
             &make_attr(ino, FileType::Symlink, 0),
@@ -1523,9 +1528,7 @@ impl fuser::Filesystem for SqliteFs {
             *p = newparent;
         }
         self.dirty_root = true;
-        if self.dirty_root {
-            let _ = self.commit_dirty_tree();
-        }
+        self.mark_dirty();
         reply.ok();
     }
 

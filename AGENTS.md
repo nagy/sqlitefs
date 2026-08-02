@@ -7,7 +7,7 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 ```
 .
 ├── CONTEXT.md           # Ubiquitous language / glossary
-├── AGENTS.md            # This file (includes the remaining-work list at the end)
+├── AGENTS.md            # This file
 ├── Cargo.toml
 ├── Cargo.lock
 ├── shell.nix            # Nix dev shell
@@ -66,14 +66,6 @@ See `docs/adr/` for the full record. Summary:
 - **Snapshot browsing**: `.sqlitefs/refs/<name>/` (hidden from readdir)
 - **Hash access** (`.sqlitefs/c/<hash-prefix>/`): ✓ (prefix lookup in commits table, cached)
 
-## Remaining work
-
-The numbered list below is the single source of truth for what remains. When an entry is finished, **remove it entirely** — never cross out, never mark done.
-
-### 1. Performance
-
-1. **Every mutation is O(entire repo)** — `mkdir`/`rmdir`/`unlink`/`rename`/`symlink`/`truncate` set `dirty_root = true` and immediately `commit_dirty_tree()`, which walks the full tree and rebuilds the entire snapshot tree from every ref. `cp -r` of many dirs is quadratic. Decide on one model: commit on a debounce/`fsync`, or lazily rebuild the snapshot tree on lookup.
-
 ## Rules for agents
 
 When working on this repo, agents MUST:
@@ -84,4 +76,4 @@ When working on this repo, agents MUST:
 4. **Treat `cargo fmt` as mandatory** before every commit.
 5. **Build with `nix-shell --run "cargo build"`** — `cargo fmt && cargo clippy` too.
 6. **Git commits without GPG signing** — use `--no-gpg-sign`.
-7. **Keep the Remaining work list up to date** (at the end of this file) — add new outstanding work as numbered entries; when an entry is finished, remove it entirely (never cross out, never mark done).
+7. **Keep the Remaining work list up to date** — when the list exists, add new outstanding work as numbered entries; when an entry is finished, remove it entirely (never cross out, never mark done).
