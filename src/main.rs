@@ -1487,6 +1487,7 @@ fn mount_fs(db_path: &PathBuf, mount_point: &PathBuf) -> Result<(), Box<dyn std:
             MountOption::FSName("sqlitefs".into()),
             MountOption::AutoUnmount,
             MountOption::AllowRoot,
+            MountOption::DefaultPermissions,
         ],
     )
     .map_err(|e| format!("mount failed (is /dev/fuse accessible?): {e}").into())

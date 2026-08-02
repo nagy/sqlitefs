@@ -83,8 +83,7 @@ The numbered list below is the single source of truth for what remains. When an 
 ### 3. Process & testing
 
 5. **No `fsck` command** — walk refs → verify DAG reachability, rebuild indexes. First real validation tool; also de-risks GC.
-6. **Missing `DefaultPermissions` mount option** — without it the kernel doesn't enforce the 0644/0755 mode bits, so anything is writable by anyone with mount access.
-7. **Run the NixOS VM test with a debug build** — `default.nix`'s `buildRustPackage` defaults `cargoBuildType` to `release`, so `debug_assert!`s (in our code or in fuser's) are compiled out in the test. Switch the test to a debug build (`cargoBuildType = "debug"` or a separate test derivation) so future `debug_assert!`s are actually exercised. Note: fuser's existing asserts on WRITE/SETXATTR sizes and readdir buffers are unconditional `assert!`s (fire in release too); the read-reply path has no assert — consider adding a `debug_assert` for reply length ≤ requested size.
+6. **Run the NixOS VM test with a debug build** — `default.nix`'s `buildRustPackage` defaults `cargoBuildType` to `release`, so `debug_assert!`s (in our code or in fuser's) are compiled out in the test. Switch the test to a debug build (`cargoBuildType = "debug"` or a separate test derivation) so future `debug_assert!`s are actually exercised. Note: fuser's existing asserts on WRITE/SETXATTR sizes and readdir buffers are unconditional `assert!`s (fire in release too); the read-reply path has no assert — consider adding a `debug_assert` for reply length ≤ requested size.
 
 ## Rules for agents
 
