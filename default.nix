@@ -35,11 +35,19 @@ rustPlatform.buildRustPackage (finalAttrs: {
         hostPkgs = pkgs;
         name = "sqlitefs";
 
-        nodes.machine = { pkgs, ... }: {
-          environment.systemPackages = [ finalAttrs.finalPackage pkgs.fuse3 pkgs.sqlite ];
-          boot.kernelModules = [ "fuse" ];
-          virtualisation.diskSize = 1024;
-        };
+        nodes.machine =
+          { pkgs, ... }:
+          {
+            environment.systemPackages = [
+              # Run the VM test against a DEBUG build so debug_assert!s (ours and
+              # fuser's) are actually exercised; the main build stays release.
+              (finalAttrs.finalPackage.overrideAttrs { cargoBuildType = "debug"; })
+              pkgs.fuse3
+              pkgs.sqlite
+            ];
+            boot.kernelModules = [ "fuse" ];
+            virtualisation.diskSize = 1024;
+          };
 
         testScript = ''
           # ---- init ----
