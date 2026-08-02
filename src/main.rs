@@ -65,6 +65,8 @@ enum Command {
     },
     /// Verify repository integrity: every CID reachable from a ref resolves.
     Fsck { db_path: PathBuf },
+    /// List all refs and the commit hash each points at (git-style).
+    ShowRef { db_path: PathBuf },
 }
 
 fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -274,6 +276,30 @@ fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 /// Format a CID's bytes as hex for error messages.
 fn hex_cid(cid: &[u8]) -> String {
     cid.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Read all refs as (name, commit_hash) sorted by name. Testable core of show-ref.
+/// Read all refs as (name, commit_hash) sorted by name. Testable core of show-ref.
+#[allow(clippy::type_complexity)]
+fn list_refs(
+    db: &rusqlite::Connection,
+) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
+    let mut stmt = db.prepare("SELECT name, commit_hash FROM refs ORDER BY name")?;
+    let refs = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    Ok(refs)
+}
+
+/// List all refs with the commit hash each points at, git show-ref style.
+fn show_ref(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let db = rusqlite::Connection::open(db_path)?;
+    for (name, hash) in list_refs(&db)? {
+        println!("{} {}", hex_cid(&hash), name);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1652,6 +1678,7 @@ fn main() {
             mount_point,
         } => mount_fs(&db_path, &mount_point),
         Command::Fsck { db_path } => fsck_repo(&db_path),
+        Command::ShowRef { db_path } => show_ref(&db_path),
     };
 
     if let Err(e) = result {
@@ -1682,6 +1709,39 @@ mod tests {
             other => panic!("refs inode should be a Dir, got {:?}", other.map(|_| ())),
         };
         assert!(refs.contains_key("main"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// show-ref lists refs sorted by name: main after init, plus tagged refs.
+    #[test]
+    fn test_show_ref_lists_all_refs() {
+        let path = temp_db_path("show_ref.db");
+        init_repo(&path).unwrap();
+
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let names: Vec<String> = list_refs(&db)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, vec!["main"]);
+
+        // Commit a second ref; both must appear, sorted.
+        let mut fs = SqliteFs::open(&path).unwrap();
+        fs.commit_as_ref("feature").unwrap();
+        let names: Vec<String> = list_refs(&db)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, vec!["feature", "main"]);
+
+        // Each ref's hash is a valid dag-cbor commit CID (36 bytes, codec 0x71).
+        for (_, hash) in list_refs(&db).unwrap() {
+            assert_eq!(hash.len(), 36);
+            assert_eq!(hash[1], 0x71); // dag-cbor
+        }
+
         let _ = std::fs::remove_file(&path);
     }
 

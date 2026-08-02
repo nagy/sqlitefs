@@ -127,6 +127,12 @@ rustPlatform.buildRustPackage (finalAttrs: {
           machine.succeed("test -f /tmp/mnt/.sqlitefs/refs/test-snap/subdir/renamed.txt")
           machine.succeed("grep 'hello' /tmp/mnt/.sqlitefs/refs/test-snap/subdir/renamed.txt")
 
+          # ---- show-ref lists main + the tagged snapshots ----
+          refs = machine.succeed("sqlitefs show-ref /tmp/repo/test.db")
+          assert " main" in refs, f"show-ref missing main: {refs}"
+          assert " test-snap" in refs, f"show-ref missing test-snap: {refs}"
+          assert " empty-check" in refs, f"show-ref missing empty-check: {refs}"
+
           # ---- fsck after all ops (repo must be healthy) ----
           machine.succeed("sqlitefs fsck /tmp/repo/test.db")
 

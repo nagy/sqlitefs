@@ -15,7 +15,7 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 ├── .gitignore
 ├── LICENSE              # AGPL-3.0
 ├── src/
-│   ├── main.rs          # CLI (init + mount), writable FUSE + .sqlitefs/ snapshots + tag + rename + symlinks
+│   ├── main.rs          # CLI (init, mount, fsck, show-ref), writable FUSE + .sqlitefs/ snapshots + tag + rename + symlinks
 │   ├── dag.rs           # CIDv1, dag-pb, dag-cbor, v1-2025 UnixFS DAG builder
 │   └── cdc.rs           # Content-defined chunking via FastCDC v2020 + SHA-256
 └── docs/
