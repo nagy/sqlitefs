@@ -241,6 +241,10 @@ struct SqliteFs {
 impl SqliteFs {
     fn open(db_path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let db = rusqlite::Connection::open(db_path)?;
+        // WAL + relaxed sync: faster writes, better crash consistency for an
+        // embedded DB behind a FUSE writer. journal_mode is persistent; setting it
+        // here also upgrades pre-existing repos. Idempotent.
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         let mut ino_gen = InoGen::new(SNAPSHOT_HASH_INODE + 1);
         let mut entries = HashMap::new();
 
