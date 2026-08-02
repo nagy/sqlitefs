@@ -90,6 +90,13 @@ rustPlatform.buildRustPackage (finalAttrs: {
           machine.succeed("rm /tmp/mnt/mylink")
           machine.fail("test -L /tmp/mnt/mylink")
 
+          # ---- empty file persists (touch foo must survive a commit) ----
+          machine.succeed("touch /tmp/mnt/empty.txt")
+          machine.succeed("test -f /tmp/mnt/empty.txt")
+          machine.succeed("test ! -s /tmp/mnt/empty.txt")
+          machine.succeed("touch /tmp/mnt/.sqlitefs/tag/empty-check")
+          machine.succeed("test -f /tmp/mnt/.sqlitefs/refs/empty-check/empty.txt")
+
           # ---- truncate ----
           machine.succeed("echo 'new content' > /tmp/mnt/subdir/renamed.txt")
           machine.succeed("grep 'new content' /tmp/mnt/subdir/renamed.txt")
@@ -100,6 +107,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
           # ---- remount and verify persistence ----
           machine.succeed("sqlitefs mount /tmp/repo/test.db /tmp/mnt > /dev/null 2>&1 &")
           machine.wait_until_succeeds("test -d /tmp/mnt/.sqlitefs/refs/main")
+          # empty file (touch foo) survived the commit + remount
+          machine.succeed("test -f /tmp/mnt/empty.txt")
+          machine.succeed("test ! -s /tmp/mnt/empty.txt")
           machine.succeed("test -d /tmp/mnt/subdir")
           machine.succeed("test -f /tmp/mnt/subdir/renamed.txt")
           machine.succeed("grep 'new content' /tmp/mnt/subdir/renamed.txt")

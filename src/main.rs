@@ -529,6 +529,18 @@ impl SqliteFs {
         Ok(())
     }
 
+    /// Create and store an empty file manifest (dag-cbor `[]`), returning its bytes.
+    /// Empty files are real files — they need a manifest CID so `build_dir_dag` links
+    /// them instead of skipping them (otherwise `touch foo` loses `foo` on commit).
+    fn store_empty_manifest(&mut self) -> Vec<u8> {
+        let (manifest_data, mc) = dag::encode_file_manifest(&[]);
+        let _ = self.db.execute(
+            "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+            rusqlite::params![mc.to_bytes(), manifest_data],
+        );
+        mc.to_bytes()
+    }
+
     /// Recursively build a dag-pb directory node for `inode` and its children.
     /// Returns (encoded_dag_pb, Cid). Also inserts file manifests + chunks into DB
     /// and populates directory_index.
@@ -565,8 +577,9 @@ impl SqliteFs {
                 Some(Entry::File {
                     manifest_cid: None, ..
                 }) => {
-                    // ponytail: file was created but never written to; skip.
-                    continue;
+                    // Empty file (created but never written, or truncated): link a
+                    // real empty manifest so the file is persisted, not skipped.
+                    self.store_empty_manifest()
                 }
                 Some(Entry::Symlink { target }) => {
                     let (sym_dag, sym_cid) = dag::encode_symlink(target);
@@ -724,6 +737,10 @@ impl fuser::Filesystem for SqliteFs {
         // Only truncation is implemented; mode/uid/gid/utimes are silently ignored.
         #[allow(clippy::collapsible_if)]
         if let Some(0) = size {
+            // Truncated-to-zero file is still a real (empty) file: store an empty
+            // manifest so it doesn't vanish from the next commit. Compute it before
+            // taking the mutable borrow below.
+            let empty_manifest = self.store_empty_manifest();
             if let Some(Entry::File {
                 size: s,
                 manifest_cid,
@@ -731,7 +748,7 @@ impl fuser::Filesystem for SqliteFs {
             }) = self.entries.get_mut(&ino)
             {
                 *s = 0;
-                *manifest_cid = None;
+                *manifest_cid = Some(empty_manifest);
                 *v1_2025_cid = None;
                 // Clear any open file buffers for this inode (don't remove them;
                 // a write may follow from the same open file handle, e.g. echo > file).
@@ -920,11 +937,15 @@ impl fuser::Filesystem for SqliteFs {
         }
         let ino = self.ino_gen.next();
         children.insert(name_str.to_string(), ino);
+        // Newly created empty file: store an empty manifest now so it is persisted
+        // even if never written to (touch foo survives a commit). Compute it before
+        // the mutable borrows below.
+        let empty_manifest = self.store_empty_manifest();
         self.entries.insert(
             ino,
             Entry::File {
                 size: 0,
-                manifest_cid: None,
+                manifest_cid: Some(empty_manifest),
                 v1_2025_cid: None,
             },
         );
