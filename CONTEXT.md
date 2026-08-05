@@ -37,8 +37,12 @@ The set of all physical chunks stored in SQLite, indexed by SHA-256 hash. The fo
 _Avoid_: Blob store, CAS
 
 **Directory index**:
-SQLite table `directory_index` mapping `(parent_cid, name, child_cid)`. A materialized view of the DAG directory structure for fast path lookups. Rebuildable.
+SQLite table `directory_index` mapping `(parent_cid, name, child_cid, file_mode)`. A materialized view of the DAG directory structure for fast path lookups. Rebuildable (via `sqlitefs rebuild-index`). `file_mode` is a denormalized copy of the mode stored in each file's manifest.
 _Avoid_: Inode table, path cache
+
+**File manifest**:
+A dag-cbor array per file: `[size, mode, chunk_hash1, ...]`. Content-addressed — its CID is what a directory tree links. Embedding size+mode means `stat()`/chmod don't need to fetch file data; changing mode produces a new manifest CID.
+_Avoid_: File node, file metadata blob
 
 **Dirty state**:
 In-memory filesystem modifications between commits. Accumulated as FUSE writes, hashed on `close()`. Lost on crash. Only committed state is persistent.

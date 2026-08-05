@@ -17,7 +17,7 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 ├── src/
 │   ├── main.rs          # Entry point: FUSE trait impl (writable root + .sqlitefs/ snapshots + tag + rename + symlinks)
 │   ├── fs.rs            # Stateful core: Entry tree, SqliteFs, DAG build/commit, chunk store access
-│   ├── cli.rs           # CLI (init, mount, fsck, show-ref) + repo-level ops
+│   ├── cli.rs           # CLI (init, mount, fsck, rebuild-index, show-ref) + repo-level ops
 │   ├── dag.rs           # CIDv1, dag-pb, dag-cbor, v1-2025 UnixFS DAG builder
 │   └── cdc.rs           # Content-defined chunking via FastCDC v2020 + SHA-256
 └── docs/
@@ -58,12 +58,13 @@ See `docs/adr/` for the full record. Summary:
 |`symlink`, `readlink`                       |✓                                          |
 |`forget`                                    |✓                                          |
 |`getxattr`, `listxattr`                     |Stub (no xattrs)                           |
-|`setattr` (truncate-to-zero)                |✓ (auto-commit; mode/uid/utimes ignored)   |
+|`setattr` (truncate-to-zero, chmod)         |✓ (auto-commit; uid/gid/utimes ignored)    |
 |`flush`, `fsync`                            |Not needed (no-op ok)                      |
 
 ## Snapshot model
 
 - **Auto-commit**: every 60s if dirty, checked on `lookup`/`create`/`open`
+- **File modes**: mode is embedded in the file manifest (dag-cbor); chmod re-stores the manifest (new CID). `directory_index.file_mode` is a denormalized cache; `sqlitefs rebuild-index` recreates it from refs (run once when upgrading old repos)
 - **Manual named snapshot**: `touch .sqlitefs/tag/<name>` creates a named ref
 - **Snapshot browsing**: `.sqlitefs/refs/<name>/` (hidden from readdir)
 - **Hash access** (`.sqlitefs/c/<hash-prefix>/`): ✓ (prefix lookup in commits table, cached)

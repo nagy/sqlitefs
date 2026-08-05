@@ -42,6 +42,8 @@ pub(crate) enum Entry {
     },
     File {
         size: u64,
+        /// Permission bits (mode & 0o7777, e.g. 0o755 for executables).
+        mode: u32,
         /// Manifest CID (content-addressed list of chunk hashes).
         manifest_cid: Option<Vec<u8>>,
         /// v1-2025 root CID (IPFS-compatible).
@@ -60,7 +62,7 @@ pub(crate) struct DirtyFile {
 /// Write an empty file manifest (dag-cbor `[]`) into `db` and return its CID bytes.
 /// Works on a plain connection or a transaction (Transaction derefs to Connection).
 pub(crate) fn store_empty_manifest(db: &rusqlite::Connection) -> Vec<u8> {
-    let (manifest_data, mc) = dag::encode_file_manifest(&[], 0);
+    let (manifest_data, mc) = dag::encode_file_manifest(&[], 0, 0o644);
     let _ = db.execute(
         "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
         rusqlite::params![mc.to_bytes(), manifest_data],
@@ -73,8 +75,9 @@ pub(crate) fn store_file_manifest(
     db: &rusqlite::Connection,
     chunk_hashes: &[[u8; 32]],
     size: u64,
+    mode: u32,
 ) -> dag::Cid {
-    let (manifest_data, mc) = dag::encode_file_manifest(chunk_hashes, size);
+    let (manifest_data, mc) = dag::encode_file_manifest(chunk_hashes, size, mode);
     let _ = db.execute(
         "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
         rusqlite::params![mc.to_bytes(), manifest_data],
@@ -300,7 +303,7 @@ impl SqliteFs {
         }
         let size = if dag::is_file_manifest(&data) {
             let mut total: u64 = 0;
-            if let Some((embedded_size, hashes)) = dag::decode_file_manifest(&data) {
+            if let Some((embedded_size, hashes, _)) = dag::decode_file_manifest(&data) {
                 match embedded_size {
                     Some(sz) => total = sz,
                     // Old format (no embedded size): sum chunk lengths.
@@ -323,6 +326,9 @@ impl SqliteFs {
         };
         Entry::File {
             size,
+            mode: dag::decode_file_manifest(&data)
+                .and_then(|(_, _, m)| m)
+                .unwrap_or(0o644),
             manifest_cid: Some(cid.to_vec()),
             v1_2025_cid: None,
         }
@@ -450,10 +456,12 @@ impl SqliteFs {
 
     /// Store a released file's chunks + manifest + v1-2025 blocks in ONE transaction,
     /// returning the manifest CID. A crash mid-write rolls back, so no partial file.
+    /// `mode` is persisted into the manifest so a chmod survives commit/remount.
     pub(crate) fn store_released_file(
         &self,
         data: &[u8],
         chunks: &[([u8; 32], Vec<u8>)],
+        mode: u32,
     ) -> Result<dag::Cid, Box<dyn std::error::Error>> {
         let chunk_hashes: Vec<[u8; 32]> = chunks.iter().map(|(h, _)| *h).collect();
 
@@ -474,8 +482,8 @@ impl SqliteFs {
                 rusqlite::params![hash.to_vec(), chunk_data],
             );
         }
-        // Create the file manifest (dag-cbor array of chunk hashes).
-        let mc = store_file_manifest(&tx, &chunk_hashes, data.len() as u64);
+        // Create the file manifest (dag-cbor array of chunk hashes + size + mode).
+        let mc = store_file_manifest(&tx, &chunk_hashes, data.len() as u64, mode);
 
         // Build v1-2025 DAG (IPFS-compatible) from the assembled file.
         let v1_dag = dag::build_v1_2025_dag(data);
@@ -576,11 +584,13 @@ impl SqliteFs {
             .collect();
         let (dir_data, dir_cid) = dag::dir_with_links(&link_refs);
 
-        // Populate directory_index for this node.
+        // Populate directory_index for this node. file_mode is the mode of a
+        // direct file child (NULL for dirs/symlinks). It's derived from the
+        // manifest chunk, so rebuilding the index from refs restores it.
         for (name, child_cid) in &links {
             let _ = tx.execute(
-                "INSERT OR REPLACE INTO directory_index (parent_cid, name, child_cid) VALUES (?1, ?2, ?3)",
-                rusqlite::params![dir_cid.to_bytes(), name, child_cid],
+                "INSERT OR REPLACE INTO directory_index (parent_cid, name, child_cid, file_mode) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![dir_cid.to_bytes(), name, child_cid, None::<i64>],
             );
         }
 

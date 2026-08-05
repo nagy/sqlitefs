@@ -55,11 +55,14 @@ rustPlatform.buildRustPackage (finalAttrs: {
           machine.succeed("sqlitefs init /tmp/repo/test.db")
 
           # ---- mount ----
-          machine.succeed("sqlitefs mount /tmp/repo/test.db /tmp/mnt > /dev/null 2>&1 &")
+          machine.succeed("sqlitefs mount /tmp/repo/test.db /tmp/mnt > /tmp/mount.log 2>&1 &")
           machine.wait_until_succeeds("test -d /tmp/mnt/.sqlitefs/refs/main")
+          machine.succeed("cat /tmp/mount.log || true")
 
           # ---- basic file ops ----
           machine.succeed("echo 'hello sqlitefs' > /tmp/mnt/file1.txt")
+          machine.succeed("cat /tmp/mount.log || true")
+          machine.succeed("cat /tmp/mount.log | grep -i 'failed\|error' || true")
           machine.succeed("test -f /tmp/mnt/file1.txt")
           machine.succeed("grep 'hello sqlitefs' /tmp/mnt/file1.txt")
 
@@ -81,6 +84,29 @@ rustPlatform.buildRustPackage (finalAttrs: {
           machine.succeed("touch /tmp/mnt/.sqlitefs/tag/test-snap")
           machine.succeed("test -d /tmp/mnt/.sqlitefs/refs/test-snap")
           machine.succeed("test -f /tmp/mnt/.sqlitefs/refs/test-snap/subdir/renamed.txt")
+
+          # ---- executable bit + exec of a real binary ----
+
+          # Copy pkgs.hello's /bin/hello (a dynamically-linked ELF) onto the
+          # filesystem. cp -p preserves the source's 0755 mode, so this also
+          # verifies that mode bits are carried through the write path.
+          machine.succeed("cp -p ${pkgs.hello}/bin/hello /tmp/mnt/hello")
+          machine.succeed("test -x /tmp/mnt/hello")
+          machine.succeed("/tmp/mnt/hello")
+          machine.succeed("/tmp/mnt/hello | grep 'Hello, world!'")
+
+          # Explicit chmod path: copy without -p (comes in as 0644), chmod +x,
+          # then execute. Exercises setattr's mode handling, not just the
+          # source-mode passthrough.
+          machine.succeed("cp ${pkgs.hello}/bin/hello /tmp/mnt/hello2")
+          machine.fail("test -x /tmp/mnt/hello2")
+          machine.succeed("chmod +x /tmp/mnt/hello2")
+          machine.succeed("test -x /tmp/mnt/hello2")
+          machine.succeed("/tmp/mnt/hello2 | grep 'Hello, world!'")
+
+          # The chmod must survive a commit + remount (mode is part of the tree).
+          machine.succeed("touch /tmp/mnt/.sqlitefs/tag/exec-check")
+          machine.succeed("test -x /tmp/mnt/.sqlitefs/refs/exec-check/hello2")
 
           # ---- hash access ----
           # Use the deterministic test-snap ref (proven to contain subdir/renamed.txt)
@@ -111,9 +137,10 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
           # ---- unmount ----
           machine.succeed("fusermount3 -u /tmp/mnt")
+          machine.succeed("cat /tmp/mount.log || true")
 
           # ---- remount and verify persistence ----
-          machine.succeed("sqlitefs mount /tmp/repo/test.db /tmp/mnt > /dev/null 2>&1 &")
+          machine.succeed("sqlitefs mount /tmp/repo/test.db /tmp/mnt > /tmp/mount.log 2>&1 &")
           machine.wait_until_succeeds("test -d /tmp/mnt/.sqlitefs/refs/main")
           # empty file (touch foo) survived the commit + remount
           machine.succeed("test -f /tmp/mnt/empty.txt")
@@ -132,6 +159,12 @@ rustPlatform.buildRustPackage (finalAttrs: {
           assert " main" in refs, f"show-ref missing main: {refs}"
           assert " test-snap" in refs, f"show-ref missing test-snap: {refs}"
           assert " empty-check" in refs, f"show-ref missing empty-check: {refs}"
+          assert " exec-check" in refs, f"show-ref missing exec-check: {refs}"
+
+          # ---- executable bit survives remount (mode is committed with the tree) ----
+          machine.succeed("test -x /tmp/mnt/hello")
+          machine.succeed("test -x /tmp/mnt/hello2")
+          machine.succeed("/tmp/mnt/hello2 | grep 'Hello, world!'")
 
           # ---- fsck after all ops (repo must be healthy) ----
           machine.succeed("sqlitefs fsck /tmp/repo/test.db")

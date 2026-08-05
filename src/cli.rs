@@ -28,6 +28,9 @@ pub(crate) enum Command {
     },
     /// Verify repository integrity: every CID reachable from a ref resolves.
     Fsck { db_path: PathBuf },
+    /// Rebuild the directory_index materialized view from the chunk store.
+    /// Run once after upgrading a repo created by an older sqlitefs version.
+    RebuildIndex { db_path: PathBuf },
     /// List all refs and the commit hash each points at (git-style).
     ShowRef { db_path: PathBuf },
 }
@@ -51,6 +54,7 @@ pub(crate) fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>
             parent_cid BLOB NOT NULL,
             name        TEXT NOT NULL,
             child_cid   BLOB NOT NULL,
+            file_mode   INTEGER,
             PRIMARY KEY (parent_cid, name)
         ) STRICT;
 
@@ -82,6 +86,8 @@ pub(crate) fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>
         "INSERT INTO chunks (hash, data) VALUES (?1, ?2)",
         rusqlite::params![empty_tree_cid.to_bytes(), empty_tree_data],
     )?;
+    // An empty dir has no directory_index rows; load_dir_recursive on the empty
+    // tree just yields an empty Dir. Nothing to seed.
 
     let now = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -166,7 +172,7 @@ pub(crate) fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Err
         }
         // File manifest: verify every chunk hash resolves.
         if dag::is_file_manifest(&data) {
-            if let Some((_, hashes)) = dag::decode_file_manifest(&data) {
+            if let Some((_, hashes, _)) = dag::decode_file_manifest(&data) {
                 for h in &hashes {
                     if !chunk_exists(h, db) {
                         errors.push(format!(
@@ -239,6 +245,100 @@ pub(crate) fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Err
 /// Format a CID's bytes as hex for error messages.
 pub(crate) fn hex_cid(cid: &[u8]) -> String {
     cid.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Rebuild the `directory_index` materialized view from the chunk store.
+/// `directory_index` is a derived cache (ADR-0001) and carries no data that
+/// isn't reachable from refs; this is safe to run on any repo. Needed when the
+/// view gains columns (e.g. `file_mode`) that old repos lack: `mount` reads the
+/// view, so it must be upgraded before the schema change is used.
+pub(crate) fn rebuild_index(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let db = rusqlite::Connection::open(db_path)?;
+
+    // Old repos created before the view had `file_mode`: recreate the table
+    // with the new column. The unique constraint is added back after the walk
+    // (INSERT OR IGNORE would otherwise skip re-inserting an existing row's
+    // parent/name with the new column).
+    db.execute_batch(
+        "DROP TABLE IF EXISTS directory_index;
+         CREATE TABLE directory_index (
+             parent_cid BLOB NOT NULL,
+             name        TEXT NOT NULL,
+             child_cid   BLOB NOT NULL,
+             file_mode   INTEGER
+         ) STRICT;",
+    )?;
+
+    // Walk every ref's commit chain → tree, like fsck, and repopulate the view.
+    let refs = list_refs(&db)?;
+    let mut visited: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    for (_name, commit_hash) in refs {
+        let mut current = Some(commit_hash);
+        while let Some(hash) = current {
+            if !visited.insert(hash.clone()) {
+                break;
+            }
+            let row: Option<(Option<Vec<u8>>, Vec<u8>)> = db
+                .query_row(
+                    "SELECT parent, tree_cid FROM commits WHERE hash = ?1",
+                    rusqlite::params![hash],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            let Some((parent, tree_cid)) = row else {
+                break;
+            };
+            walk_dir_for_index(&db, &tree_cid)?;
+            current = parent;
+        }
+    }
+
+    // Restore the uniqueness constraint.
+    db.execute_batch(
+        "CREATE UNIQUE INDEX idx_directory_index_pk ON directory_index (parent_cid, name);",
+    )?;
+
+    println!("rebuild-index: OK — directory_index rebuilt from refs.");
+    Ok(())
+}
+
+/// Recursively insert (parent, name, child, file_mode) rows for a dir tree.
+/// Mirrors `build_dir_dag`: child is a file if its chunk is a file manifest,
+/// a directory if its chunk is a dir dag-pb, a symlink otherwise.
+fn walk_dir_for_index(
+    db: &rusqlite::Connection,
+    cid: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Ok(data) = db.query_row(
+        "SELECT data FROM chunks WHERE hash = ?1",
+        rusqlite::params![cid],
+        |r| r.get::<_, Vec<u8>>(0),
+    ) else {
+        return Ok(());
+    };
+    let Some(links) = dag::decode_dir_links(&data) else {
+        return Ok(());
+    };
+    for (name, child_cid) in links {
+        let mode = match db.query_row(
+            "SELECT data FROM chunks WHERE hash = ?1",
+            rusqlite::params![child_cid],
+            |r| r.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(data) if dag::is_file_manifest(&data) => {
+                dag::decode_file_manifest(&data).and_then(|(_, _, m)| m)
+            }
+            _ => None,
+        };
+        db.execute(
+            "INSERT OR IGNORE INTO directory_index (parent_cid, name, child_cid, file_mode) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![cid, name, child_cid, mode],
+        )?;
+        if mode.is_none() {
+            walk_dir_for_index(db, &child_cid)?;
+        }
+    }
+    Ok(())
 }
 
 /// Read all refs as (name, commit_hash) sorted by name. Testable core of show-ref.

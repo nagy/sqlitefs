@@ -27,11 +27,11 @@ use crate::fs::{
 // FUSE trait impl — writable root + read-only .sqlitefs/
 // ---------------------------------------------------------------------------
 
-fn make_attr(inode: u64, kind: FileType, size: u64) -> FileAttr {
+fn make_attr(inode: u64, kind: FileType, size: u64, mode: Option<u32>) -> FileAttr {
     let (perm, nlink) = match kind {
         FileType::Directory => (0o755, 2),
         FileType::Symlink => (0o777, 1),
-        _ => (0o644, 1),
+        _ => (mode.unwrap_or(0o644) as u16, 1),
     };
     FileAttr {
         ino: inode,
@@ -100,14 +100,14 @@ impl fuser::Filesystem for SqliteFs {
                 reply.error(ENOENT);
                 return;
             };
-            let (kind, size) = match child {
-                Entry::Dir { .. } => (FileType::Directory, 0),
-                Entry::Symlink { .. } => (FileType::Symlink, 0),
-                Entry::File { size, .. } => (FileType::RegularFile, *size),
+            let (kind, size, mode) = match child {
+                Entry::Dir { .. } => (FileType::Directory, 0, None),
+                Entry::Symlink { .. } => (FileType::Symlink, 0, None),
+                Entry::File { size, mode, .. } => (FileType::RegularFile, *size, Some(*mode)),
             };
             reply.entry(
                 &std::time::Duration::MAX,
-                &make_attr(target_ino, kind, size),
+                &make_attr(target_ino, kind, size, mode),
                 0,
             );
             return;
@@ -122,14 +122,14 @@ impl fuser::Filesystem for SqliteFs {
                 reply.error(ENOENT);
                 return;
             };
-            let (kind, size) = match child {
-                Entry::Dir { .. } => (FileType::Directory, 0),
-                Entry::Symlink { .. } => (FileType::Symlink, 0),
-                Entry::File { size, .. } => (FileType::RegularFile, *size),
+            let (kind, size, mode) = match child {
+                Entry::Dir { .. } => (FileType::Directory, 0, None),
+                Entry::Symlink { .. } => (FileType::Symlink, 0, None),
+                Entry::File { size, mode, .. } => (FileType::RegularFile, *size, Some(*mode)),
             };
             reply.entry(
                 &std::time::Duration::MAX,
-                &make_attr(child_ino, kind, size),
+                &make_attr(child_ino, kind, size, mode),
                 0,
             );
         } else {
@@ -142,12 +142,12 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(ENOENT);
             return;
         };
-        let (kind, size) = match entry {
-            Entry::Dir { .. } => (FileType::Directory, 0),
-            Entry::Symlink { .. } => (FileType::Symlink, 0),
-            Entry::File { size, .. } => (FileType::RegularFile, *size),
+        let (kind, size, mode) = match entry {
+            Entry::Dir { .. } => (FileType::Directory, 0, None),
+            Entry::Symlink { .. } => (FileType::Symlink, 0, None),
+            Entry::File { size, mode, .. } => (FileType::RegularFile, *size, Some(*mode)),
         };
-        reply.attr(&std::time::Duration::MAX, &make_attr(ino, kind, size));
+        reply.attr(&std::time::Duration::MAX, &make_attr(ino, kind, size, mode));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -155,7 +155,7 @@ impl fuser::Filesystem for SqliteFs {
         &mut self,
         _req: &Request,
         ino: u64,
-        _mode: Option<u32>,
+        mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
         size: Option<u64>,
@@ -169,7 +169,7 @@ impl fuser::Filesystem for SqliteFs {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        // Only truncation is implemented; mode/uid/gid/utimes are silently ignored.
+        // Truncate-to-zero and chmod are implemented; uid/gid/utimes are ignored.
         #[allow(clippy::collapsible_if)]
         if let Some(0) = size {
             // Truncated-to-zero file is still a real (empty) file: store an empty
@@ -180,6 +180,7 @@ impl fuser::Filesystem for SqliteFs {
                 size: s,
                 manifest_cid,
                 v1_2025_cid,
+                ..
             }) = self.entries.get_mut(&ino)
             {
                 *s = 0;
@@ -197,16 +198,50 @@ impl fuser::Filesystem for SqliteFs {
             }
             // ponytail: non-zero truncation on committed files not implemented
         }
-        let (kind, s) = match self.entries.get(&ino) {
-            Some(Entry::Dir { .. }) => (FileType::Directory, 0),
-            Some(Entry::Symlink { .. }) => (FileType::Symlink, 0),
-            Some(Entry::File { size, .. }) => (FileType::RegularFile, *size),
+        // Apply chmod (mode & 0o7777) to regular files. The mode lives in the
+        // manifest, so re-store it with the new mode (new manifest CID → the
+        // commit links it, and snapshots/remounts see the exec bit). Other kinds
+        // keep their hardcoded perms. Mark dirty so the mode survives a commit.
+        if let Some(m) = mode
+            && let Some(Entry::File {
+                mode: f,
+                manifest_cid,
+                ..
+            }) = self.entries.get_mut(&ino)
+        {
+            let new_mode = m & 0o7777;
+            if *f != new_mode {
+                *f = new_mode;
+                // Re-store the manifest with the new mode if we can decode the old one.
+                if let Some(old_cid) = manifest_cid.clone()
+                    && let Ok(old_data) = self.db.query_row(
+                        "SELECT data FROM chunks WHERE hash = ?1",
+                        rusqlite::params![old_cid],
+                        |r| r.get::<_, Vec<u8>>(0),
+                    )
+                    && let Some((new_data, new_cid)) =
+                        dag::reencode_manifest_with_mode(&old_data, new_mode)
+                {
+                    let _ = self.db.execute(
+                        "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
+                        rusqlite::params![new_cid.to_bytes(), new_data],
+                    );
+                    *manifest_cid = Some(new_cid.to_bytes());
+                }
+                self.dirty_root = true;
+                self.mark_dirty();
+            }
+        }
+        let (kind, s, m) = match self.entries.get(&ino) {
+            Some(Entry::Dir { .. }) => (FileType::Directory, 0, None),
+            Some(Entry::Symlink { .. }) => (FileType::Symlink, 0, None),
+            Some(Entry::File { size, mode, .. }) => (FileType::RegularFile, *size, Some(*mode)),
             None => {
                 reply.error(ENOENT);
                 return;
             }
         };
-        reply.attr(&std::time::Duration::MAX, &make_attr(ino, kind, s));
+        reply.attr(&std::time::Duration::MAX, &make_attr(ino, kind, s, m));
     }
 
     fn mkdir(
@@ -250,7 +285,7 @@ impl fuser::Filesystem for SqliteFs {
         self.mark_dirty();
         reply.entry(
             &std::time::Duration::MAX,
-            &make_attr(ino, FileType::Directory, 0),
+            &make_attr(ino, FileType::Directory, 0, None),
             0,
         );
     }
@@ -333,6 +368,7 @@ impl fuser::Filesystem for SqliteFs {
                 ino,
                 Entry::File {
                     size: 0,
+                    mode: 0o644,
                     manifest_cid: None,
                     v1_2025_cid: None,
                 },
@@ -342,7 +378,7 @@ impl fuser::Filesystem for SqliteFs {
             self.open_files.insert((ino, fh), DirtyFile::default());
             reply.created(
                 &std::time::Duration::MAX,
-                &make_attr(ino, FileType::RegularFile, 0),
+                &make_attr(ino, FileType::RegularFile, 0, Some(0o644)),
                 0,
                 fh,
                 0,
@@ -374,6 +410,7 @@ impl fuser::Filesystem for SqliteFs {
             ino,
             Entry::File {
                 size: 0,
+                mode: 0o644,
                 manifest_cid: Some(empty_manifest),
                 v1_2025_cid: None,
             },
@@ -385,7 +422,7 @@ impl fuser::Filesystem for SqliteFs {
 
         reply.created(
             &std::time::Duration::MAX,
-            &make_attr(ino, FileType::RegularFile, 0),
+            &make_attr(ino, FileType::RegularFile, 0, Some(0o644)),
             0,
             fh,
             0,
@@ -452,9 +489,16 @@ impl fuser::Filesystem for SqliteFs {
             if !df.data.is_empty() {
                 let chunks = cdc::chunk_file(&df.data);
 
+                // Preserve the file's mode across a re-write (chmod then edit).
+                let cur_mode = match self.entries.get(&ino) {
+                    Some(Entry::File { mode, .. }) => *mode,
+                    _ => 0o644,
+                };
+
                 // All chunk/manifest/block writes happen in ONE transaction so a crash
                 // mid-write cannot leave a partial file (some chunks but no manifest).
-                let Ok(mc) = self.store_released_file(&df.data, &chunks) else {
+                let store_result = self.store_released_file(&df.data, &chunks, cur_mode);
+                let Ok(mc) = store_result else {
                     reply.error(libc::EIO);
                     return;
                 };
@@ -561,7 +605,7 @@ impl fuser::Filesystem for SqliteFs {
                 reply.data(&[]);
                 return;
             };
-            if let Some((_, hashes)) = dag::decode_file_manifest(&manifest_data) {
+            if let Some((_, hashes, _)) = dag::decode_file_manifest(&manifest_data) {
                 // Assemble only the chunks overlapping [off, end), not the whole file.
                 // Walk cumulative offsets using cheap length() queries; fetch full
                 // data only for chunks that intersect the requested window.
@@ -655,7 +699,7 @@ impl fuser::Filesystem for SqliteFs {
         self.mark_dirty();
         reply.entry(
             &std::time::Duration::MAX,
-            &make_attr(ino, FileType::Symlink, 0),
+            &make_attr(ino, FileType::Symlink, 0, None),
             0,
         );
     }
@@ -845,6 +889,7 @@ fn main() {
         } => mount_fs(&db_path, &mount_point),
         cli::Command::Fsck { db_path } => cli::fsck_repo(&db_path),
         cli::Command::ShowRef { db_path } => cli::show_ref(&db_path),
+        cli::Command::RebuildIndex { db_path } => cli::rebuild_index(&db_path),
     };
 
     if let Err(e) = result {
@@ -858,7 +903,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cdc;
-    use crate::cli::{init_repo, list_refs};
+    use crate::cli::{init_repo, list_refs, rebuild_index};
     use crate::dag;
     use crate::fs::{
         Entry, ROOT_INODE, SNAPSHOT_REFS_INODE, SqliteFs, store_empty_manifest, store_file_manifest,
@@ -937,7 +982,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let mc = store_file_manifest(&fs.db, &chunk_hashes, data.len() as u64);
+        let mc = store_file_manifest(&fs.db, &chunk_hashes, data.len() as u64, 0o644);
 
         // Insert a File entry into the writable root.
         let ino = fs.ino_gen.next();
@@ -945,6 +990,7 @@ mod tests {
             ino,
             Entry::File {
                 size: data.len() as u64,
+                mode: 0o644,
                 manifest_cid: Some(mc.to_bytes()),
                 v1_2025_cid: None,
             },
@@ -978,7 +1024,51 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// store_released_file writes chunks + manifest + blocks atomically;
+    /// Mode must survive commit + reopen: it's embedded in the manifest, which
+    /// is what child_entry_from_cid decodes on load.
+    #[test]
+    fn test_mode_survives_commit_and_reopen() {
+        let path = temp_db_path("mode_survives.db");
+        init_repo(&path).unwrap();
+        let mut fs = SqliteFs::open(&path).unwrap();
+
+        let data = b"#!/bin/sh\necho hi\n".to_vec();
+        let chunks = cdc::chunk_file(&data);
+        let mc = fs.store_released_file(&data, &chunks, 0o755).unwrap();
+
+        let ino = fs.ino_gen.next();
+        fs.entries.insert(
+            ino,
+            Entry::File {
+                size: data.len() as u64,
+                mode: 0o755,
+                manifest_cid: Some(mc.to_bytes()),
+                v1_2025_cid: None,
+            },
+        );
+        if let Some(Entry::Dir { children, .. }) = fs.entries.get_mut(&ROOT_INODE) {
+            children.insert("run.sh".to_string(), ino);
+        }
+        fs.dirty_root = true;
+        fs.commit_as_ref("main").unwrap();
+
+        // Reopen (mount): mode comes back from the manifest chunk.
+        let fs2 = SqliteFs::open(&path).unwrap();
+        let root_children = match fs2.entries.get(&ROOT_INODE) {
+            Some(Entry::Dir { children, .. }) => children,
+            other => panic!("root should be a Dir, got {:?}", other.map(|_| ())),
+        };
+        let run_ino = root_children
+            .get("run.sh")
+            .expect("run.sh should survive commit + reopen");
+        match fs2.entries.get(run_ino) {
+            Some(Entry::File { mode, .. }) => assert_eq!(*mode, 0o755),
+            other => panic!("run.sh should be a File, got {:?}", other.map(|_| ())),
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// the manifest must decode back to the file's size.
     #[test]
     fn test_store_released_file_roundtrip() {
@@ -988,7 +1078,7 @@ mod tests {
 
         let data = b"the quick brown fox jumps over the lazy dog".repeat(100);
         let chunks = cdc::chunk_file(&data);
-        let mc = fs.store_released_file(&data, &chunks).unwrap();
+        let mc = fs.store_released_file(&data, &chunks, 0o755).unwrap();
 
         // Manifest decodes to (size, hashes) matching the input.
         let manifest_data: Vec<u8> = fs
@@ -999,8 +1089,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let (size, hashes) = dag::decode_file_manifest(&manifest_data).unwrap();
+        let (size, hashes, mode) = dag::decode_file_manifest(&manifest_data).unwrap();
         assert_eq!(size, Some(data.len() as u64));
+        assert_eq!(mode, Some(0o755));
         assert_eq!(hashes, chunk_hashes(&chunks));
 
         // All chunks are present in the store.
@@ -1030,7 +1121,7 @@ mod tests {
         // > 1 MiB so the DAG has multiple leaves + at least one intermediate.
         let data = vec![0x42u8; 3 * 1024 * 1024];
         let chunks = cdc::chunk_file(&data);
-        let mc = fs.store_released_file(&data, &chunks).unwrap();
+        fs.store_released_file(&data, &chunks, 0o644).unwrap();
 
         let dag = dag::build_v1_2025_dag(&data);
         let leaf_cids: std::collections::HashSet<Vec<u8>> = dag
@@ -1065,7 +1156,53 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// store_empty_manifest produces a decodable empty manifest.
+    /// rebuild_index reconstructs directory_index (incl. file_mode) from refs;
+    /// dropping it must not lose the mode, and remount must still work.
+    #[test]
+    fn test_rebuild_index_recovers_modes() {
+        let path = temp_db_path("rebuild_index.db");
+        init_repo(&path).unwrap();
+        let mut fs = SqliteFs::open(&path).unwrap();
+
+        let data = b"echo hi\n".to_vec();
+        let chunks = cdc::chunk_file(&data);
+        let mc = fs.store_released_file(&data, &chunks, 0o755).unwrap();
+        let ino = fs.ino_gen.next();
+        fs.entries.insert(
+            ino,
+            Entry::File {
+                size: data.len() as u64,
+                mode: 0o755,
+                manifest_cid: Some(mc.to_bytes()),
+                v1_2025_cid: None,
+            },
+        );
+        if let Some(Entry::Dir { children, .. }) = fs.entries.get_mut(&ROOT_INODE) {
+            children.insert("run.sh".to_string(), ino);
+        }
+        fs.dirty_root = true;
+        fs.commit_as_ref("main").unwrap();
+
+        // Simulate an old repo: drop the index and rebuild it.
+        fs.db.execute_batch("DROP TABLE directory_index").unwrap();
+        rebuild_index(&path).unwrap();
+
+        // Mount again: the mode must be back.
+        let fs2 = SqliteFs::open(&path).unwrap();
+        let run_ino = match fs2.entries.get(&ROOT_INODE) {
+            Some(Entry::Dir { children, .. }) => *children
+                .get("run.sh")
+                .expect("run.sh should be back after rebuild"),
+            _ => panic!("root should be a Dir"),
+        };
+        match fs2.entries.get(&run_ino) {
+            Some(Entry::File { mode, .. }) => assert_eq!(*mode, 0o755),
+            other => panic!("run.sh should be a File, got {:?}", other.map(|_| ())),
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn test_empty_manifest_roundtrip() {
         let path = temp_db_path("empty.db");
@@ -1080,8 +1217,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let (size, hashes) = dag::decode_file_manifest(&data).unwrap();
+        let (size, hashes, mode) = dag::decode_file_manifest(&data).unwrap();
         assert_eq!(size, Some(0));
+        assert_eq!(mode, Some(0o644));
         assert!(hashes.is_empty());
         let _ = std::fs::remove_file(&path);
     }
