@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use clap::{Parser, Subcommand};
+use clap_complete::Shell;
 
 use crate::dag;
 
@@ -33,6 +34,12 @@ pub(crate) enum Command {
     RebuildIndex { db_path: PathBuf },
     /// List all refs and the commit hash each points at (git-style).
     ShowRef { db_path: PathBuf },
+    /// Generate shell completion scripts.
+    Completions {
+        /// The shell to generate completions for.
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 pub(crate) fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {

@@ -11,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use fuser::{
     FileAttr, FileType, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyWrite, ReplyXattr, Request,
@@ -890,6 +890,12 @@ fn main() {
         cli::Command::Fsck { db_path } => cli::fsck_repo(&db_path),
         cli::Command::ShowRef { db_path } => cli::show_ref(&db_path),
         cli::Command::RebuildIndex { db_path } => cli::rebuild_index(&db_path),
+        cli::Command::Completions { shell } => {
+            let mut cmd = cli::Cli::command();
+            let name = cmd.get_name().to_string();
+            clap_complete::generate(shell, &mut cmd, &name, &mut std::io::stdout());
+            return;
+        }
     };
 
     if let Err(e) = result {

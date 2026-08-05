@@ -16,15 +16,24 @@ rustPlatform.buildRustPackage (finalAttrs: {
   cargoLock = {
     lockFile = ./Cargo.lock;
   };
-
   strictDeps = true;
 
-  nativeBuildInputs = [ pkg-config ];
+  nativeBuildInputs = [
+    pkg-config
+    pkgs.installShellFiles
+  ];
 
   buildInputs = [
     fuse3
     sqlite
   ];
+
+  postInstall = ''
+    installShellCompletion --cmd sqlitefs \
+      --bash <($out/bin/sqlitefs completions bash) \
+      --zsh <($out/bin/sqlitefs completions zsh) \
+      --fish <($out/bin/sqlitefs completions fish)
+  '';
 
   passthru.tests =
     let
