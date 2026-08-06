@@ -40,6 +40,8 @@ See `docs/adr/` for the full record. Summary:
 ## Tooling
 
 - **Build**: `nix-shell --run "cargo build"` (also `cargo fmt`, `cargo clippy`)
+- **Clippy**: pedantic on by default via `[lints.clippy]` in Cargo.toml; intentional `as` casts in varint/base32 encoding and FUSE offsets are allowed there, so `cargo clippy` runs clean.
+
 - **Language**: Rust
 - **Key crates (current)**: `clap` (CLI), `rusqlite` (SQLite), `fuser` (FUSE), `libc` (errnos), `sha2` (SHA-256), `fastcdc` (CDC chunking)
 - **Key crates (planned)**: none pending

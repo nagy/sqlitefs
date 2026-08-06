@@ -2,7 +2,7 @@
 use sha2::{Digest, Sha256};
 
 /// Split data into content-defined chunks, returning (`sha256_hash`, `chunk_bytes`) pairs.
-/// Uses FastCDC v2020 with expected 256 KiB average chunk size.
+/// Uses `FastCDC` v2020 with expected 256 KiB average chunk size.
 pub fn chunk_file(data: &[u8]) -> Vec<([u8; 32], Vec<u8>)> {
     let mut chunks = Vec::new();
     // Minimum 64 KiB, average 256 KiB, maximum 1 MiB.

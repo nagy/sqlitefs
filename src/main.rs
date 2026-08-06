@@ -1034,7 +1034,7 @@ mod tests {
     }
 
     /// Mode must survive commit + reopen: it's embedded in the manifest, which
-    /// is what child_entry_from_cid decodes on load.
+    /// is what `child_entry_from_cid` decodes on load.
     #[test]
     fn test_mode_survives_commit_and_reopen() {
         let path = temp_db_path("mode_survives.db");
@@ -1113,13 +1113,13 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert!(present, "chunk {} missing", hex(&h));
+            assert!(present, "chunk {} missing", hex(h));
         }
 
         let _ = std::fs::remove_file(&path);
     }
 
-    /// block_chunks must only map LEAF blocks — intermediate dag-pb nodes cover
+    /// `block_chunks` must only map LEAF blocks — intermediate dag-pb nodes cover
     /// the union of their children's spans and would duplicate every leaf's rows.
     #[test]
     fn test_block_chunks_leaves_only() {
@@ -1165,7 +1165,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// rebuild_index reconstructs directory_index (incl. file_mode) from refs;
+    /// `rebuild_index` reconstructs `directory_index` (incl. `file_mode`) from refs;
     /// dropping it must not lose the mode, and remount must still work.
     #[test]
     fn test_rebuild_index_recovers_modes() {
@@ -1238,6 +1238,11 @@ mod tests {
     }
 
     fn hex(b: &[u8; 32]) -> String {
-        b.iter().map(|x| format!("{x:02x}")).collect()
+        use std::fmt::Write;
+        let mut s = String::with_capacity(64);
+        for x in b {
+            let _ = write!(s, "{x:02x}");
+        }
+        s
     }
 }

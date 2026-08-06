@@ -3,6 +3,20 @@ name = "sqlitefs"
 version = "0.1.0"
 edition = "2024"
 
+[lints.clippy]
+# Run pedantic by default (no `-W clippy::pedantic` needed), but allow the
+# intentional cases: bounded `as` casts in varint/base32 encoding and FUSE
+# offsets, and one long fsck function. `cargo clippy` is thus clean and
+# pedantic-aware in one step.
+pedantic = { level = "warn", priority = -1 }
+
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+too_many_lines = "allow"
+items_after_statements = "allow"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"

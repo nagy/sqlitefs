@@ -22,7 +22,7 @@ const BASE32: [char; 32] = [
     't', 'u', 'v', 'w', 'x', 'y', 'z', '2', '3', '4', '5', '6', '7',
 ];
 
-/// CIDv1 with sha2-256 and a given codec.
+/// `CIDv1` with sha2-256 and a given codec.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cid {
     codec: u64,
@@ -62,7 +62,7 @@ impl Cid {
         &self.hash
     }
 
-    /// CIDv1 string, base32 (multibase prefix 'b'), no padding — the standard
+    /// `CIDv1` string, base32 (multibase prefix 'b'), no padding — the standard
     /// human-readable form (e.g. `bafyrei…`). Algorithm matches RFC 4648.
     pub fn to_string_base32(&self) -> String {
         base32_encode(&self.to_bytes())
@@ -111,16 +111,16 @@ fn base32_encode(data: &[u8]) -> String {
 // dag-pb: UnixFS directory node
 // ---------------------------------------------------------------------------
 
-/// Build an empty UnixFS directory dag-pb node.
+/// Build an empty `UnixFS` directory dag-pb node.
 /// Returns (`encoded_dag_pb_bytes`, CID).
-/// `PBNode` { Data: [0x08, 0x01] (UnixFS Type=Directory), Links: [] }
+/// `PBNode` { Data: [0x08, 0x01] (`UnixFS` Type=Directory), Links: [] }
 pub fn empty_dir() -> (Vec<u8>, Cid) {
     let data = encode_pb_node(&[0x08, 0x01], &[]);
     let cid = Cid::hash_dag_pb(&data);
     (data, cid)
 }
 
-/// Build a UnixFS directory dag-pb node with children.
+/// Build a `UnixFS` directory dag-pb node with children.
 /// Each link: (name, `cid_bytes`, tsize=0).
 #[allow(dead_code)]
 pub fn dir_with_links(links: &[(&str, &[u8])]) -> (Vec<u8>, Cid) {
@@ -324,7 +324,7 @@ pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]], size: u64, mode: u32) -> 
 // ---------------------------------------------------------------------------
 
 /// Encode a symlink as a dag-pb node. Data = [0x08, 0x04] + target bytes.
-/// No links. CIDv1 dag-pb.
+/// No links. `CIDv1` dag-pb.
 pub fn encode_symlink(target: &str) -> (Vec<u8>, Cid) {
     let mut unixfs = vec![0x08, 0x04];
     unixfs.extend_from_slice(target.as_bytes());
@@ -354,7 +354,7 @@ pub fn is_dir_dag(data: &[u8]) -> bool {
     data.len() >= 4 && data[0] == 0x0a && data[1] >= 2 && data[2] == 0x08 && data[3] == 0x01
 }
 
-/// Decode the Links of a dag-pb node into (name, cid_bytes) pairs.
+/// Decode the Links of a dag-pb node into (name, `cid_bytes`) pairs.
 /// Returns None on parse failure. Matches the format produced by `dir_with_links`:
 /// repeated field 2 (0x12) messages, each containing hash (field 1), name
 /// (field 2), tsize (field 3).
@@ -534,7 +534,7 @@ pub struct V1Dag {
     pub root: Cid,
 }
 
-/// Build a v1-2025 UnixFS DAG for a file's worth of bytes.
+/// Build a v1-2025 `UnixFS` DAG for a file's worth of bytes.
 /// The physical CDC chunks must already be concatenated into `data`.
 pub fn build_v1_2025_dag(data: &[u8]) -> V1Dag {
     if data.is_empty() {
@@ -691,7 +691,7 @@ mod tests {
     /// A real dag-cbor CID string: prefix `bafyrei`, 59 chars.
     #[test]
     fn test_base32_real_cid() {
-        let (_, commit_cid) = encode_commit(None, &empty_dir().0, 1700000000);
+        let (_, commit_cid) = encode_commit(None, &empty_dir().0, 1_700_000_000);
         let s = commit_cid.to_string_base32();
         assert!(s.starts_with("bafyrei"));
         assert_eq!(s.len(), 59);
@@ -701,7 +701,7 @@ mod tests {
     fn test_commit_roundtrip() {
         let (_tree_data, tree_cid) = empty_dir();
         let tree_bytes = tree_cid.to_bytes();
-        let (cbor, commit_cid) = encode_commit(None, &tree_bytes, 1700000000);
+        let (cbor, commit_cid) = encode_commit(None, &tree_bytes, 1_700_000_000);
         // CID prefix: 01 71 12 20
         let cid_bytes = commit_cid.to_bytes();
         assert_eq!(&cid_bytes[0..4], &[0x01, 0x71, 0x12, 0x20]);
@@ -758,9 +758,9 @@ mod tests {
             h[0] = i;
             chunks.push(h);
         }
-        let (data, _) = encode_file_manifest(&chunks, 123456789, 0);
+        let (data, _) = encode_file_manifest(&chunks, 123_456_789, 0);
         let (size, decoded, mode) = decode_file_manifest(&data).unwrap();
-        assert_eq!(size, Some(123456789));
+        assert_eq!(size, Some(123_456_789));
         assert_eq!(mode, Some(0o644)); // 0 → canonical default
         assert_eq!(decoded.len(), 5);
         assert_eq!(decoded, chunks);
@@ -833,7 +833,7 @@ mod tests {
         let leaves: Vec<_> = dag.blocks.iter().filter(|b| b.cid.codec() == RAW).collect();
         assert_eq!(leaves.len(), 3);
         assert_eq!(leaves[0].file_offset, 0);
-        assert_eq!(leaves[1].file_offset, 1 * 1024 * 1024);
+        assert_eq!(leaves[1].file_offset, 1024 * 1024);
         assert_eq!(leaves[2].file_offset, 2 * 1024 * 1024);
         // Root is dag-pb.
         assert_eq!(dag.root.codec(), DAG_PB);

@@ -29,7 +29,7 @@ pub(crate) enum Command {
     },
     /// Verify repository integrity: every CID reachable from a ref resolves.
     Fsck { db_path: PathBuf },
-    /// Rebuild the directory_index materialized view from the chunk store.
+    /// Rebuild the `directory_index` materialized view from the chunk store.
     /// Run once after upgrading a repo created by an older sqlitefs version.
     RebuildIndex { db_path: PathBuf },
     /// List all refs and the commit hash each points at (git-style).
@@ -251,7 +251,12 @@ pub(crate) fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Err
 
 /// Format a CID's bytes as hex for error messages.
 pub(crate) fn hex_cid(cid: &[u8]) -> String {
-    cid.iter().map(|b| format!("{b:02x}")).collect()
+    let mut s = String::with_capacity(cid.len() * 2);
+    for b in cid {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// Rebuild the `directory_index` materialized view from the chunk store.
@@ -309,7 +314,7 @@ pub(crate) fn rebuild_index(db_path: &PathBuf) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-/// Recursively insert (parent, name, child, file_mode) rows for a dir tree.
+/// Recursively insert (parent, name, child, `file_mode`) rows for a dir tree.
 /// Mirrors `build_dir_dag`: child is a file if its chunk is a file manifest,
 /// a directory if its chunk is a dir dag-pb, a symlink otherwise.
 fn walk_dir_for_index(
@@ -348,8 +353,8 @@ fn walk_dir_for_index(
     Ok(())
 }
 
-/// Read all refs as (name, commit_hash) sorted by name. Testable core of show-ref.
-/// Read all refs as (name, commit_hash) sorted by name. Testable core of show-ref.
+/// Read all refs as (name, `commit_hash`) sorted by name. Testable core of show-ref.
+/// Read all refs as (name, `commit_hash`) sorted by name. Testable core of show-ref.
 #[allow(clippy::type_complexity)]
 pub(crate) fn list_refs(
     db: &rusqlite::Connection,
@@ -364,7 +369,7 @@ pub(crate) fn list_refs(
 }
 
 /// List all refs with the commit CID each points at, git show-ref style.
-/// Commit CIDs are printed in standard base32 CIDv1 form (`bafyrei…`).
+/// Commit CIDs are printed in standard base32 `CIDv1` form (`bafyrei…`).
 pub(crate) fn show_ref(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
     for (name, hash) in list_refs(&db)? {

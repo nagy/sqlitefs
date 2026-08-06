@@ -373,7 +373,7 @@ impl SqliteFs {
 
     /// Debounced auto-commit: commit if dirty and no mutation for 60s.
     /// Called from lookup/create/open — a long-running bulk copy keeps bumping
-    /// the timer via mark_dirty, so we commit once after it settles, not per op.
+    /// the timer via `mark_dirty`, so we commit once after it settles, not per op.
     pub(crate) fn maybe_auto_commit(&mut self) {
         if !self.dirty_root {
             return;
