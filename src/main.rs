@@ -961,9 +961,12 @@ mod tests {
         assert_eq!(names, vec!["feature", "main"]);
 
         // Each ref's hash is a valid dag-cbor commit CID (36 bytes, codec 0x71).
+        // Its base32 string starts with the standard CIDv1 dag-cbor prefix `bafyrei`.
         for (_, hash) in list_refs(&db).unwrap() {
             assert_eq!(hash.len(), 36);
             assert_eq!(hash[1], 0x71); // dag-cbor
+            let cid = dag::Cid::from_raw(dag::DAG_CBOR, hash[4..].try_into().unwrap());
+            assert!(cid.to_string_base32().starts_with("bafyrei"));
         }
 
         let _ = std::fs::remove_file(&path);
@@ -1080,7 +1083,7 @@ mod tests {
     fn test_store_released_file_roundtrip() {
         let path = temp_db_path("released.db");
         init_repo(&path).unwrap();
-        let mut fs = SqliteFs::open(&path).unwrap();
+        let fs = SqliteFs::open(&path).unwrap();
 
         let data = b"the quick brown fox jumps over the lazy dog".repeat(100);
         let chunks = cdc::chunk_file(&data);
@@ -1122,7 +1125,7 @@ mod tests {
     fn test_block_chunks_leaves_only() {
         let path = temp_db_path("block_chunks.db");
         init_repo(&path).unwrap();
-        let mut fs = SqliteFs::open(&path).unwrap();
+        let fs = SqliteFs::open(&path).unwrap();
 
         // > 1 MiB so the DAG has multiple leaves + at least one intermediate.
         let data = vec![0x42u8; 3 * 1024 * 1024];

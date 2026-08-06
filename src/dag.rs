@@ -16,6 +16,12 @@ pub const SHA256_LEN: u8 = 0x20;
 #[allow(dead_code)]
 pub const CID_PREFIX_LEN: usize = 4; // version + codec varint + mh-code + mh-len
 
+/// RFC 4648 base32 alphabet (lowercase, no padding).
+const BASE32: [char; 32] = [
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's',
+    't', 'u', 'v', 'w', 'x', 'y', 'z', '2', '3', '4', '5', '6', '7',
+];
+
 /// CIDv1 with sha2-256 and a given codec.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cid {
@@ -56,6 +62,12 @@ impl Cid {
         &self.hash
     }
 
+    /// CIDv1 string, base32 (multibase prefix 'b'), no padding — the standard
+    /// human-readable form (e.g. `bafyrei…`). Algorithm matches RFC 4648.
+    pub fn to_string_base32(&self) -> String {
+        base32_encode(&self.to_bytes())
+    }
+
     /// Full CID bytes: 0x01 <codec-varint> 0x12 0x20 <32 hash bytes>
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0x01];
@@ -73,6 +85,26 @@ fn encode_varint(mut v: u64, buf: &mut Vec<u8>) {
         v >>= 7;
     }
     buf.push(v as u8);
+}
+
+/// RFC 4648 base32, multibase prefix 'b', no padding.
+fn base32_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(60);
+    out.push('b');
+    let mut buf: u32 = 0;
+    let mut bits = 0u32;
+    for &byte in data {
+        buf = (buf << 8) | byte as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(BASE32[(buf >> bits) as usize & 0x1f]);
+        }
+    }
+    if bits > 0 {
+        out.push(BASE32[(buf << (5 - bits)) as usize & 0x1f]);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -636,6 +668,33 @@ mod tests {
         let (_, cid1) = empty_dir();
         let (_, cid2) = empty_dir();
         assert_eq!(cid1.to_bytes(), cid2.to_bytes());
+    }
+
+    /// RFC 4648 §10 test vectors against the raw base32 core, prefixed with 'b'
+    /// (multibase base32, no padding).
+    #[test]
+    fn test_base32_rfc4648_vectors() {
+        let cases = [
+            (b"".as_slice(), "b"),
+            (b"f", "bmy"),
+            (b"fo", "bmzxq"),
+            (b"foo", "bmzxw6"),
+            (b"foob", "bmzxw6yq"),
+            (b"fooba", "bmzxw6ytb"),
+            (b"foobar", "bmzxw6ytboi"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(base32_encode(input), want, "input {input:?}");
+        }
+    }
+
+    /// A real dag-cbor CID string: prefix `bafyrei`, 59 chars.
+    #[test]
+    fn test_base32_real_cid() {
+        let (_, commit_cid) = encode_commit(None, &empty_dir().0, 1700000000);
+        let s = commit_cid.to_string_base32();
+        assert!(s.starts_with("bafyrei"));
+        assert_eq!(s.len(), 59);
     }
 
     #[test]

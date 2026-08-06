@@ -363,11 +363,13 @@ pub(crate) fn list_refs(
     Ok(refs)
 }
 
-/// List all refs with the commit hash each points at, git show-ref style.
+/// List all refs with the commit CID each points at, git show-ref style.
+/// Commit CIDs are printed in standard base32 CIDv1 form (`bafyrei…`).
 pub(crate) fn show_ref(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
     for (name, hash) in list_refs(&db)? {
-        println!("{} {}", hex_cid(&hash), name);
+        let cid = dag::Cid::from_raw(dag::DAG_CBOR, hash[4..].try_into()?);
+        println!("{} {}", cid.to_string_base32(), name);
     }
     Ok(())
 }
