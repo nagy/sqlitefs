@@ -704,6 +704,28 @@ impl fuser::Filesystem for SqliteFs {
         );
     }
 
+    /// Create a hard link: a new directory entry pointing at the same inode.
+    /// The child keeps its manifest CID, so the DAG dedups and `st_ino`
+    /// identity follows the content. Files only — dirs/symlinks are rejected
+    /// (POSIX forbids hard-linking directories).
+    fn link(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        newparent: u64,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        match self.link_entry(ino, newparent, newname) {
+            Ok((size, mode)) => reply.entry(
+                &std::time::Duration::MAX,
+                &make_attr(ino, FileType::RegularFile, size, Some(mode)),
+                0,
+            ),
+            Err(err) => reply.error(err),
+        }
+    }
+
     fn rename(
         &mut self,
         _req: &Request,
@@ -848,6 +870,45 @@ impl fuser::Filesystem for SqliteFs {
     }
 }
 
+impl SqliteFs {
+    /// Core hard-link logic, extracted for testing. Returns the linked file's
+    /// (size, mode) for the reply, or a libc errno.
+    fn link_entry(&mut self, ino: u64, newparent: u64, newname: &OsStr) -> Result<(u64, u32), i32> {
+        let Some(newname_str) = newname.to_str() else {
+            return Err(libc::EINVAL);
+        };
+        if newparent == SNAPSHOT_DIR_INODE
+            || newparent == SNAPSHOT_REFS_INODE
+            || newparent == SNAPSHOT_TAG_INODE
+            || newparent == SNAPSHOT_HASH_INODE
+        {
+            return Err(libc::EROFS);
+        }
+        if !matches!(self.entries.get(&ino), Some(Entry::File { .. })) {
+            // ext4: EPERM for symlinks, EISDIR for directories.
+            let err = match self.entries.get(&ino) {
+                Some(Entry::Dir { .. }) => libc::EISDIR,
+                _ => libc::EPERM,
+            };
+            return Err(err);
+        }
+        let Some(Entry::Dir { children, .. }) = self.entries.get_mut(&newparent) else {
+            return Err(ENOTDIR);
+        };
+        if children.contains_key(newname_str) {
+            return Err(libc::EEXIST);
+        }
+        children.insert(newname_str.to_string(), ino);
+        self.dirty_root = true;
+        self.mark_dirty();
+        let (size, mode) = match self.entries.get(&ino) {
+            Some(Entry::File { size, mode, .. }) => (*size, *mode),
+            _ => (0, 0o644),
+        };
+        Ok((size, mode))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -906,6 +967,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::ffi::OsStr;
     use std::path::PathBuf;
 
     use crate::cdc;
@@ -1230,6 +1293,190 @@ mod tests {
         assert_eq!(size, Some(0));
         assert_eq!(mode, Some(0o644));
         assert!(hashes.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two names pointing at the same inode share one manifest CID, and the
+    /// hard link is visible in the directory tree + committed DAG.
+    #[test]
+    fn test_link_creates_shared_inode() {
+        let path = temp_db_path("link.db");
+        init_repo(&path).unwrap();
+        let mut fs = SqliteFs::open(&path).unwrap();
+
+        let dir_ino = fs.ino_gen.next();
+        fs.entries.insert(
+            dir_ino,
+            Entry::Dir {
+                children: HashMap::new(),
+                parent: ROOT_INODE,
+            },
+        );
+        let file_ino = fs.ino_gen.next();
+        let manifest_cid = store_empty_manifest(&fs.db);
+        fs.entries.insert(
+            file_ino,
+            Entry::File {
+                size: 0,
+                mode: 0o644,
+                manifest_cid: Some(manifest_cid.clone()),
+                v1_2025_cid: None,
+            },
+        );
+        let mut root = match fs.entries.get_mut(&ROOT_INODE) {
+            Some(Entry::Dir { children, .. }) => children,
+            _ => panic!("root should be a Dir"),
+        };
+        root.insert("dir".to_string(), dir_ino);
+        root.insert("orig".to_string(), file_ino);
+
+        // Hard link dir/orig -> dir/link.
+        let (size, mode) = fs
+            .link_entry(file_ino, dir_ino, std::ffi::OsStr::new("link"))
+            .unwrap();
+        assert_eq!((size, mode), (0, 0o644));
+        let dir = match fs.entries.get(&dir_ino) {
+            Some(Entry::Dir { children, .. }) => children,
+            _ => panic!("dir should be a Dir"),
+        };
+        assert_eq!(dir.get("link"), Some(&file_ino));
+
+        // Both names resolve to the same inode -> same manifest CID.
+        let cid_of = |fs: &SqliteFs, parent: u64, name: &str| {
+            let Some(Entry::Dir { children, .. }) = fs.entries.get(&parent) else {
+                panic!("expected dir");
+            };
+            let ino = *children.get(name).expect("child should exist");
+            match fs.entries.get(&ino) {
+                Some(Entry::File {
+                    manifest_cid: Some(cid),
+                    ..
+                }) => cid.clone(),
+                other => panic!("expected file, got {:?}", other.map(|_| ())),
+            }
+        };
+        assert_eq!(cid_of(&fs, ROOT_INODE, "orig"), manifest_cid);
+        assert_eq!(cid_of(&fs, dir_ino, "link"), manifest_cid);
+
+        // Commit and verify the DAG has both names pointing at the same CID.
+        fs.dirty_root = true;
+        fs.commit_as_ref("main").unwrap();
+        let main_commit: Vec<u8> = fs
+            .db
+            .query_row(
+                "SELECT commit_hash FROM refs WHERE name = 'main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let main_cid: Vec<u8> = fs
+            .db
+            .query_row(
+                "SELECT tree_cid FROM commits WHERE hash = ?1",
+                rusqlite::params![main_commit],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let children_of =
+            |fs: &SqliteFs, parent_cid: &[u8]| -> std::collections::HashMap<String, Vec<u8>> {
+                fs.db
+                    .prepare("SELECT name, child_cid FROM directory_index WHERE parent_cid = ?1")
+                    .unwrap()
+                    .query_map(rusqlite::params![parent_cid], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .collect()
+            };
+        let root_children = children_of(&fs, &main_cid);
+        assert_eq!(root_children.get("orig"), Some(&manifest_cid));
+        // The hard link lives inside the dir subtree and points at the same CID.
+        let dir_cid = root_children.get("dir").expect("dir should be in root");
+        let dir_children = children_of(&fs, dir_cid);
+        assert_eq!(dir_children.get("link"), Some(&manifest_cid));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_link_rejects_non_files() {
+        let path = temp_db_path("link_reject.db");
+        init_repo(&path).unwrap();
+        let mut fs = SqliteFs::open(&path).unwrap();
+
+        let dir_ino = fs.ino_gen.next();
+        fs.entries.insert(
+            dir_ino,
+            Entry::Dir {
+                children: HashMap::new(),
+                parent: ROOT_INODE,
+            },
+        );
+
+        // Directory target -> EISDIR.
+        assert_eq!(
+            fs.link_entry(dir_ino, ROOT_INODE, std::ffi::OsStr::new("d")),
+            Err(libc::EISDIR)
+        );
+
+        // Symlink target -> EPERM.
+        let sym_ino = fs.ino_gen.next();
+        fs.entries.insert(
+            sym_ino,
+            Entry::Symlink {
+                target: "t".to_string(),
+            },
+        );
+        assert_eq!(
+            fs.link_entry(sym_ino, ROOT_INODE, std::ffi::OsStr::new("s")),
+            Err(libc::EPERM)
+        );
+
+        // Missing target -> EPERM (not a file, not a dir).
+        assert_eq!(
+            fs.link_entry(999, ROOT_INODE, std::ffi::OsStr::new("x")),
+            Err(libc::EPERM)
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Read-only snapshot dirs reject hard links; duplicates are rejected too.
+    #[test]
+    fn test_link_rejects_snapshot_parent_and_duplicate() {
+        let path = temp_db_path("link_reject2.db");
+        init_repo(&path).unwrap();
+        let mut fs = SqliteFs::open(&path).unwrap();
+
+        let file_ino = fs.ino_gen.next();
+        let manifest_cid = store_empty_manifest(&fs.db);
+        fs.entries.insert(
+            file_ino,
+            Entry::File {
+                size: 0,
+                mode: 0o644,
+                manifest_cid: Some(manifest_cid),
+                v1_2025_cid: None,
+            },
+        );
+        let mut root = match fs.entries.get_mut(&ROOT_INODE) {
+            Some(Entry::Dir { children, .. }) => children,
+            _ => panic!("root should be a Dir"),
+        };
+        root.insert("orig".to_string(), file_ino);
+
+        // .sqlitefs/refs is read-only.
+        assert_eq!(
+            fs.link_entry(file_ino, SNAPSHOT_REFS_INODE, std::ffi::OsStr::new("x")),
+            Err(libc::EROFS)
+        );
+        // Duplicate name -> EEXIST.
+        assert_eq!(
+            fs.link_entry(file_ino, ROOT_INODE, std::ffi::OsStr::new("orig")),
+            Err(libc::EEXIST)
+        );
+
         let _ = std::fs::remove_file(&path);
     }
 

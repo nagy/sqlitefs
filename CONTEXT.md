@@ -44,6 +44,10 @@ _Avoid_: Inode table, path cache
 A dag-cbor array per file: `[size, mode, chunk_hash1, ...]`. Content-addressed — its CID is what a directory tree links. Embedding size+mode means `stat()`/chmod don't need to fetch file data; changing mode produces a new manifest CID.
 _Avoid_: File node, file metadata blob
 
+**Hard link** (files only):
+A second directory entry pointing at the same inode, i.e. the same `Entry::File` with the same manifest CID. In the DAG this is two dag-pb links with the same target CID — native dedup at commit time. Kernel-sanctioned `st_ino` identity (`-samefile`), unlike CID-derived inodes which would break the single-`parent` invariant for directories and confuse dedup-detecting tools.
+_Avoid_: Symlink, alias, CID-derived inode
+
 **Dirty state**:
 In-memory filesystem modifications between commits. Accumulated as FUSE writes, hashed on `close()`. Lost on crash. Only committed state is persistent.
 _Avoid_: Working tree, staging area, uncommitted changes

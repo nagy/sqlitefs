@@ -15,7 +15,7 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 ├── .gitignore
 ├── LICENSE              # AGPL-3.0
 ├── src/
-│   ├── main.rs          # Entry point: FUSE trait impl (writable root + .sqlitefs/ snapshots + tag + rename + symlinks)
+│   ├── main.rs          # Entry point: FUSE trait impl (writable root + .sqlitefs/ snapshots + tag + rename + symlinks + hard links)
 │   ├── fs.rs            # Stateful core: Entry tree, SqliteFs, DAG build/commit, chunk store access
 │   ├── cli.rs           # CLI (init, mount, fsck, rebuild-index, show-ref) + repo-level ops
 │   ├── dag.rs           # CIDv1, dag-pb, dag-cbor, v1-2025 UnixFS DAG builder
@@ -25,7 +25,8 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
         ├── 0001-sqlite-canonical-store.md
         ├── 0002-dual-chunking-cdc-plus-unixfs.md
         ├── 0003-ipfs-native-dag.md
-        └── 0004-live-fuse-with-snapshot-dir.md
+        ├── 0004-live-fuse-with-snapshot-dir.md
+        └── 0005-hard-links.md
 ```
 
 ## Key architectural decisions
@@ -58,6 +59,7 @@ See `docs/adr/` for the full record. Summary:
 |`unlink`                                    |✓ (with auto-commit)                       |
 |`rename`                                    |✓ (cross-directory, overwrite, auto-commit)|
 |`symlink`, `readlink`                       |✓                                          |
+|`link` (hard links for files)              |✓ (files only; new parent must be writable)|
 |`forget`                                    |✓                                          |
 |`getxattr`, `listxattr`                     |Stub (no xattrs)                           |
 |`setattr` (truncate-to-zero, chmod)         |✓ (auto-commit; uid/gid/utimes ignored)    |
@@ -68,6 +70,7 @@ See `docs/adr/` for the full record. Summary:
 - **Auto-commit**: every 60s if dirty, checked on `lookup`/`create`/`open`
 - **File modes**: mode is embedded in the file manifest (dag-cbor); chmod re-stores the manifest (new CID). `directory_index.file_mode` is a denormalized cache; `sqlitefs rebuild-index` recreates it from refs (run once when upgrading old repos)
 - **Manual named snapshot**: `touch .sqlitefs/tag/<name>` creates a named ref
+- **Hard links**: `link` creates a second directory entry pointing at the same inode (same manifest CID → dedup in the DAG). Files only; nlink is always reported as 1 (no link-count tracking) — see docs/adr/0005-hard-links.md
 - **Snapshot browsing**: `.sqlitefs/refs/<name>/` (hidden from readdir)
 - **Hash access** (`.sqlitefs/c/<hash-prefix>/`): ✓ (prefix lookup in commits table, cached)
 
