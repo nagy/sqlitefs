@@ -6,6 +6,7 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 
 ```
 .
+├── README.org           # Quick overview: features, usage, development
 ├── CONTEXT.md           # Ubiquitous language / glossary
 ├── AGENTS.md            # This file
 ├── Cargo.toml

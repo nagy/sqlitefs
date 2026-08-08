@@ -1,0 +1,55 @@
+#+title: sqlitefs
+
+A versioned, content-addressed filesystem where a single SQLite file is both
+the repository and the mountable volume.
+
+* Features
+
+- Single =repo.db= file is the whole repository: chunk store, DAG, and refs.
+- Content-addressed storage with CIDv1 + SHA-256 (dag-pb directories,
+  v1-2025 file layout, dag-cbor commits).
+- Dual chunking: FastCDC for physical dedup, UnixFS for public IPFS CIDs.
+- Writable FUSE mount; writes hash on =close()=, auto-commit every 60s.
+- Named snapshots via =.sqlitefs/tag/<name>=, snapshot browsing via
+  =.sqlitefs/refs/<name>/=, hash access via =.sqlitefs/c/<hash-prefix>/=.
+- Symlinks and hard links (files only).
+- Integrity checking: =fsck= verifies every CID reachable from a ref.
+
+* Usage
+
+#+begin_src sh
+# create a new repository
+sqlitefs init repo.db
+
+# mount it (FUSE)
+sqlitefs mount repo.db /mnt/sqlitefs
+
+# verify integrity
+sqlitefs fsck repo.db
+
+# list refs
+sqlitefs show-ref repo.db
+
+# rebuild the directory_index view (after upgrading an old repo)
+sqlitefs rebuild-index repo.db
+
+# shell completions
+sqlitefs completions bash
+#+end_src
+
+* Development
+
+#+begin_src sh
+nix-shell --run "cargo build"
+nix-shell --run "cargo fmt && cargo clippy"
+#+end_src
+
+* License
+
+AGPL-3.0. See =LICENSE=.
+
+* Further reading
+
+- =CONTEXT.md= — ubiquitous language / glossary
+- =AGENTS.md= — project conventions
+- =docs/adr/= — architectural decision records
