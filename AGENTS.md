@@ -11,7 +11,9 @@ A versioned, content-addressed filesystem where a single SQLite file is both the
 ├── Cargo.toml
 ├── Cargo.lock
 ├── shell.nix            # Nix dev shell
-├── default.nix          # Nix build
+├── default.nix          # Nix build (VM test lives in test/)
+├── test/
+│   └── default.nix       # NixOS VM test (nixos-lib.runTest, wired via passthru.tests)
 ├── .gitignore
 ├── LICENSE              # AGPL-3.0
 ├── src/
