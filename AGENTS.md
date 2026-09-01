@@ -45,6 +45,7 @@ Summary:
 ## Tooling
 
 - **Build**: `nix-shell --run "cargo build"` (also `cargo fmt`, `cargo clippy`).
+- **rustfmt.toml** (from rkyv, `max_width = 100`) — the unstable options (`imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`) need `rustfmt --edition 2024 --config 'imports_granularity=Crate,group_imports=StdExternalCrate'`.
 - **Clippy**: pedantic by default via `[lints.clippy]` in Cargo.toml.
   Intentional `as` casts (varint/base32 encoding, FUSE offsets) are allowed there, so `cargo clippy` runs clean.
 

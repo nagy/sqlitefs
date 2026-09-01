@@ -1,7 +1,6 @@
 // cli.rs — the CLI: repository init, integrity check (fsck), and ref listing.
 
-use std::path::PathBuf;
-use std::time::UNIX_EPOCH;
+use std::{path::PathBuf, time::UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;

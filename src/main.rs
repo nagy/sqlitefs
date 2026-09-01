@@ -5,11 +5,7 @@ mod cli;
 mod dag;
 mod fs;
 
-use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
-use std::time::UNIX_EPOCH;
+use std::{collections::HashMap, ffi::OsStr, os::fd::AsRawFd, path::PathBuf, time::UNIX_EPOCH};
 
 use clap::{CommandFactory, Parser};
 use fuser::{
@@ -967,15 +963,16 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::ffi::OsStr;
-    use std::path::PathBuf;
+    use std::{collections::HashMap, ffi::OsStr, path::PathBuf};
 
-    use crate::cdc;
-    use crate::cli::{init_repo, list_refs, rebuild_index};
-    use crate::dag;
-    use crate::fs::{
-        Entry, ROOT_INODE, SNAPSHOT_REFS_INODE, SqliteFs, store_empty_manifest, store_file_manifest,
+    use crate::{
+        cdc,
+        cli::{init_repo, list_refs, rebuild_index},
+        dag,
+        fs::{
+            Entry, ROOT_INODE, SNAPSHOT_REFS_INODE, SqliteFs, store_empty_manifest,
+            store_file_manifest,
+        },
     };
 
     fn temp_db_path(name: &str) -> PathBuf {

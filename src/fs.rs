@@ -1,8 +1,6 @@
 // fs.rs — the stateful core: in-memory entry tree, DAG build/commit, chunk store access.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::UNIX_EPOCH;
+use std::{collections::HashMap, path::PathBuf, time::UNIX_EPOCH};
 
 use crate::dag;
 
