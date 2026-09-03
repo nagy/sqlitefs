@@ -12,10 +12,10 @@ Built in Rust.
 ├── AGENTS.md            # this file
 ├── Cargo.toml
 ├── Cargo.lock
-├── shell.nix            # Nix dev shell
-├── default.nix          # Nix build (VM test lives in test/)
+├── flake.nix            # Nix flake: packages, devShells, checks (crate2nix)
+├── flake.lock
 ├── test/
-│   └── default.nix      # NixOS VM test (nixos-lib.runTest, wired via passthru.tests)
+│   └── default.nix      # NixOS VM test (nixos-lib.runTest, wired via checks.sqlitefs)
 ├── .gitignore
 ├── LICENSE              # AGPL-3.0
 ├── src/
@@ -44,7 +44,8 @@ Summary:
 
 ## Tooling
 
-- **Build**: `nix-shell --run "cargo build"` (also `cargo fmt`, `cargo clippy`).
+- **Build**: `nix build .#sqlitefs` (also `nix flake check`, `nix develop`).
+  Dev-shell tools come from `devShells.default`; the VM test runs via `nix flake check`.
 - **rustfmt.toml** (from rkyv, `max_width = 100`) — the unstable options (`imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`) need `rustfmt --edition 2024 --config 'imports_granularity=Crate,group_imports=StdExternalCrate'`.
 - **Clippy**: pedantic by default via `[lints.clippy]` in Cargo.toml.
   Intentional `as` casts (varint/base32 encoding, FUSE offsets) are allowed there, so `cargo clippy` runs clean.
@@ -92,7 +93,7 @@ When working on this repo, agents MUST:
 3. **Do not add dependencies lightly** — run through the ponytail filter first.
    Prefer stdlib, minimal crates.
 4. **Treat `cargo fmt` as mandatory** before every commit.
-5. **Build with `nix-shell --run "cargo build"`** — `cargo fmt && cargo clippy` too.
+5. **Build with `nix develop -c cargo build`** — `cargo fmt && cargo clippy` too.
 6. **Git commits without GPG signing** — use `--no-gpg-sign`.
 7. **Keep the Remaining work list up to date** — add new outstanding work as numbered entries.
    Remove finished entries entirely (never cross out, never mark done).

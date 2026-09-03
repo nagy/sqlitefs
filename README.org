@@ -40,8 +40,15 @@ sqlitefs completions bash
 * Development
 
 #+begin_src sh
-nix-shell --run "cargo build"
-nix-shell --run "cargo fmt && cargo clippy"
+# enter the dev shell
+nix develop
+
+# build, lint, test
+cargo build
+cargo fmt && cargo clippy
+
+# run the NixOS VM test
+nix flake check
 #+end_src
 
 * License
