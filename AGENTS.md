@@ -46,7 +46,7 @@ Summary:
 
 - **Build**: `nix build .#sqlitefs` (also `nix flake check`, `nix develop`).
   Dev-shell tools come from `devShells.default`; the VM test runs via `nix flake check`.
-- **rustfmt.toml** (from rkyv, `max_width = 100`) — the unstable options (`imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`) need `rustfmt --edition 2024 --config 'imports_granularity=Crate,group_imports=StdExternalCrate'`.
+- **rustfmt** via **treefmt-nix** (`nix fmt`) — config is passed as CLI args in `flake.nix` (`settings.formatter.rustfmt.options`), mirroring `~/chart-action/rustfmt.toml` (`max_width = 100`, `format_strings = true`, `imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`, etc.). `rustfmt.toml` exists for standalone `cargo fmt` but is not used by treefmt.
 - **Clippy**: pedantic by default via `[lints.clippy]` in Cargo.toml.
   Intentional `as` casts (varint/base32 encoding, FUSE offsets) are allowed there, so `cargo clippy` runs clean.
 

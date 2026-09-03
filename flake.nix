@@ -5,14 +5,17 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crate2nix.url = "github:nix-community/crate2nix";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   # We import the generated `Cargo.nix` from a derivation (IFD).
   nixConfig.allow-import-from-derivation = true;
 
   outputs =
-    inputs@{ flake-parts, nixpkgs, crate2nix, ... }:
+    inputs@{ flake-parts, nixpkgs, crate2nix, treefmt-nix, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
+      imports = [ treefmt-nix.flakeModule ];
       systems = [ "x86_64-linux" ];
 
       perSystem =
@@ -131,6 +134,16 @@
 
           checks.sqlitefs = vmTest;
 
+          treefmt = {
+            projectRootFile = "flake.nix";
+            programs.rustfmt.enable = true;
+            programs.rustfmt.edition = "2024";
+            settings.formatter.rustfmt.options = lib.mkAfter [
+              "--config"
+              "max_width=100,comment_width=100,wrap_comments=true,group_imports=StdExternalCrate,imports_granularity=Crate,condense_wildcard_suffixes=true,error_on_line_overflow=true,error_on_unformatted=true,format_code_in_doc_comments=true,format_macro_matchers=true,format_macro_bodies=true,format_strings=true,hex_literal_case=Lower,normalize_comments=true,use_field_init_shorthand=true"
+            ];
+          };
+
           devShells.default = pkgs.mkShell {
             nativeBuildInputs = [
               pkgs.pkg-config
@@ -139,6 +152,7 @@
               pkgs.rustfmt
               pkgs.clippy
               pkgs.installShellFiles
+              config.treefmt.build.wrapper
             ];
             buildInputs = libInputs;
             RUSTFLAGS = rpathFlags;

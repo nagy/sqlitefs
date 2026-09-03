@@ -342,7 +342,8 @@ fn walk_dir_for_index(
             _ => None,
         };
         db.execute(
-            "INSERT OR IGNORE INTO directory_index (parent_cid, name, child_cid, file_mode) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR IGNORE INTO directory_index (parent_cid, name, child_cid, file_mode) \
+             VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![cid, name, child_cid, mode],
         )?;
         if mode.is_none() {

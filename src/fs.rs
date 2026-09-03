@@ -343,7 +343,8 @@ impl SqliteFs {
         // Match prefix against commit hashes. Use LIKE with the hex-encoded hash.
         let mut stmt = db
             .prepare(
-                "SELECT hash, tree_cid, timestamp FROM commits WHERE lower(hex(hash)) LIKE ?1 ORDER BY timestamp DESC LIMIT 2",
+                "SELECT hash, tree_cid, timestamp FROM commits WHERE lower(hex(hash)) LIKE ?1 \
+                 ORDER BY timestamp DESC LIMIT 2",
             )
             .ok()?;
         let rows: Vec<(Vec<u8>, Vec<u8>, i64)> = stmt
@@ -492,8 +493,14 @@ impl SqliteFs {
                 rusqlite::params![block.cid.to_bytes(), block.data],
             );
             let _ = tx.execute(
-                "INSERT OR IGNORE INTO block_index (v1_2025_cid, file_cid, block_offset, block_length) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![block.cid.to_bytes(), mc.to_bytes(), block.file_offset as i64, block.data.len() as i64],
+                "INSERT OR IGNORE INTO block_index (v1_2025_cid, file_cid, block_offset, \
+                 block_length) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    block.cid.to_bytes(),
+                    mc.to_bytes(),
+                    block.file_offset as i64,
+                    block.data.len() as i64
+                ],
             );
 
             // Map backing CDC chunks only for LEAF blocks (RAW codec). Intermediate
@@ -508,7 +515,8 @@ impl SqliteFs {
             for &(ref cdc_hash, cdc_start, cdc_end) in &cdc_spans {
                 if cdc_end > block_start && cdc_start < block_end {
                     let _ = tx.execute(
-                        "INSERT OR IGNORE INTO block_chunks (v1_2025_cid, chunk_hash) VALUES (?1, ?2)",
+                        "INSERT OR IGNORE INTO block_chunks (v1_2025_cid, chunk_hash) VALUES (?1, \
+                         ?2)",
                         rusqlite::params![block.cid.to_bytes(), cdc_hash.to_vec()],
                     );
                 }
@@ -587,7 +595,8 @@ impl SqliteFs {
         // manifest chunk, so rebuilding the index from refs restores it.
         for (name, child_cid) in &links {
             let _ = tx.execute(
-                "INSERT OR REPLACE INTO directory_index (parent_cid, name, child_cid, file_mode) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO directory_index (parent_cid, name, child_cid, file_mode) \
+                 VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![dir_cid.to_bytes(), name, child_cid, None::<i64>],
             );
         }
