@@ -138,10 +138,15 @@
               pkgs.rustfmt
               pkgs.clippy
               pkgs.installShellFiles
+              pkgs.pkg-config
               config.treefmt.build.wrapper
             ];
             nativeBuildInputs = nativeBuildInputs;
             buildInputs = libInputs;
+            # fuser's build.sh shells out to `pkg-config` for fuse3 and needs the
+            # `fuse3.pc` on PKG_CONFIG_PATH. The devShell must expose both, else
+            # `cargo build`/`cargo doc` fail with "pkg-config command could not be found".
+            PKG_CONFIG_PATH = "${lib.makeSearchPath "lib/pkgconfig" libInputs}";
             LD_LIBRARY_PATH = lib.makeLibraryPath libInputs;
             RUSTFLAGS = lib.concatStringsSep " " (
               map (p: "-C link-arg=-Wl,-rpath,${p}") (lib.splitString ":" (lib.makeLibraryPath libInputs))
