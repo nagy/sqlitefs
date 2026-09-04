@@ -13,7 +13,13 @@
   nixConfig.allow-import-from-derivation = true;
 
   outputs =
-    inputs@{ flake-parts, nixpkgs, crate2nix, treefmt-nix, ... }:
+    inputs@{
+      flake-parts,
+      nixpkgs,
+      crate2nix,
+      treefmt-nix,
+      ...
+    }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [ treefmt-nix.flakeModule ];
       systems = [ "x86_64-linux" ];
@@ -105,16 +111,18 @@
             };
 
           # Release build: the actual package.
-          sqlitefs = (cargoNix.rootCrate.build.override {
-            crateOverrides = mkCrateOverrides true;
-          }).overrideAttrs (old: {
-            meta = old.meta // {
-              description = "Versioned content-addressed filesystem in a single SQLite file";
-              license = lib.licenses.agpl3Plus;
-              mainProgram = "sqlitefs";
-              platforms = lib.platforms.linux;
-            };
-          });
+          sqlitefs =
+            (cargoNix.rootCrate.build.override {
+              crateOverrides = mkCrateOverrides true;
+            }).overrideAttrs
+              (old: {
+                meta = old.meta // {
+                  description = "Versioned content-addressed filesystem in a single SQLite file";
+                  license = lib.licenses.agpl3Plus;
+                  mainProgram = "sqlitefs";
+                  platforms = lib.platforms.linux;
+                };
+              });
 
           # Debug build: only the release switch flips, so debug_assert!s are
           # exercised in the NixOS VM test while the main package stays release.
@@ -138,6 +146,8 @@
             projectRootFile = "flake.nix";
             programs.rustfmt.enable = true;
             programs.rustfmt.edition = "2024";
+            programs.taplo.enable = true;
+            programs.nixfmt.enable = true;
             settings.formatter.rustfmt.options = lib.mkAfter [
               "--config"
               "max_width=100,comment_width=100,wrap_comments=true,group_imports=StdExternalCrate,imports_granularity=Crate,condense_wildcard_suffixes=true,error_on_line_overflow=true,error_on_unformatted=true,format_code_in_doc_comments=true,format_macro_matchers=true,format_macro_bodies=true,format_strings=true,hex_literal_case=Lower,normalize_comments=true,use_field_init_shorthand=true"
