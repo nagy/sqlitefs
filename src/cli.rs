@@ -13,14 +13,14 @@ use crate::dag;
 /// The sqlitefs command line interface.
 #[derive(Parser)]
 #[command(name = "sqlitefs")]
-pub(crate) struct Cli {
+pub struct Cli {
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub command: Command,
 }
 
 /// The subcommand to execute.
 #[derive(Subcommand)]
-pub(crate) enum Command {
+pub enum Command {
     /// Create a new empty repository.
     Init { path: PathBuf },
     /// Mount a repository via FUSE.
@@ -44,7 +44,7 @@ pub(crate) enum Command {
     },
 }
 
-pub(crate) fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(path)?;
 
     db.execute_batch(
@@ -140,7 +140,7 @@ pub(crate) fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>
 /// chunk) and checks every CID resolves in the chunks table. Prints each problem
 /// and returns `Err` if any are found. Also the foundation for GC: chunks
 /// reachable from refs are exactly the live set.
-pub(crate) fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
     let mut errors: Vec<String> = Vec::new();
     let mut visited: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
@@ -254,7 +254,7 @@ pub(crate) fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Err
 }
 
 /// Format a CID's bytes as hex for error messages.
-pub(crate) fn hex_cid(cid: &[u8]) -> String {
+pub fn hex_cid(cid: &[u8]) -> String {
     let mut s = String::with_capacity(cid.len() * 2);
     for b in cid {
         use std::fmt::Write;
@@ -269,7 +269,7 @@ pub(crate) fn hex_cid(cid: &[u8]) -> String {
 /// isn't reachable from refs; this is safe to run on any repo. Needed when the
 /// view gains columns (e.g. `file_mode`) that old repos lack: `mount` reads the
 /// view, so it must be upgraded before the schema change is used.
-pub(crate) fn rebuild_index(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub fn rebuild_index(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
 
     // Old repos created before the view had `file_mode`: recreate the table
@@ -364,7 +364,7 @@ fn walk_dir_for_index(
 ///
 /// Testable core of show-ref.
 #[allow(clippy::type_complexity)]
-pub(crate) fn list_refs(
+pub fn list_refs(
     db: &rusqlite::Connection,
 ) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
     let mut stmt = db.prepare("SELECT name, commit_hash FROM refs ORDER BY name")?;
@@ -380,7 +380,7 @@ pub(crate) fn list_refs(
 ///
 /// Git show-ref style. Commit CIDs are printed in standard base32 `CIDv1` form
 /// (`bafyrei…`).
-pub(crate) fn show_ref(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub fn show_ref(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
     for (name, hash) in list_refs(&db)? {
         let cid = dag::Cid::from_raw(dag::DAG_CBOR, hash[4..].try_into()?);

@@ -1,9 +1,9 @@
 //! sqlitefs — a versioned, content-addressed filesystem in a single SQLite file.
 
-mod cdc;
-mod cli;
-mod dag;
-mod fs;
+pub mod cdc;
+pub mod cli;
+pub mod dag;
+pub mod fs;
 
 use std::{collections::HashMap, ffi::OsStr, os::fd::AsRawFd, path::PathBuf, time::UNIX_EPOCH};
 

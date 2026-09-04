@@ -8,18 +8,18 @@ use crate::dag;
 // Inode allocator
 // ---------------------------------------------------------------------------
 
-pub(crate) const ROOT_INODE: u64 = 1;
-pub(crate) const SNAPSHOT_DIR_INODE: u64 = 2;
-pub(crate) const SNAPSHOT_REFS_INODE: u64 = 3;
-pub(crate) const SNAPSHOT_TAG_INODE: u64 = 4;
-pub(crate) const SNAPSHOT_HASH_INODE: u64 = 5;
+pub const ROOT_INODE: u64 = 1;
+pub const SNAPSHOT_DIR_INODE: u64 = 2;
+pub const SNAPSHOT_REFS_INODE: u64 = 3;
+pub const SNAPSHOT_TAG_INODE: u64 = 4;
+pub const SNAPSHOT_HASH_INODE: u64 = 5;
 
 /// 60-second auto-commit interval.
-pub(crate) const AUTO_COMMIT_SECS: u64 = 60;
+pub const AUTO_COMMIT_SECS: u64 = 60;
 
 /// Monotonic inode allocator.
 #[derive(Default)]
-pub(crate) struct InoGen {
+pub struct InoGen {
     next: u64,
 }
 
@@ -29,7 +29,7 @@ impl InoGen {
         Self { next: start }
     }
     /// Allocate the next inode.
-    pub(crate) fn next(&mut self) -> u64 {
+    pub fn next(&mut self) -> u64 {
         let n = self.next;
         self.next += 1;
         n
@@ -37,7 +37,7 @@ impl InoGen {
 }
 
 /// An inode: a directory, a file, or a symlink.
-pub(crate) enum Entry {
+pub enum Entry {
     Dir {
         children: HashMap<String, u64>,
         parent: u64,
@@ -58,15 +58,15 @@ pub(crate) enum Entry {
 
 /// A dirty file's in-memory write buffer.
 #[derive(Default)]
-pub(crate) struct DirtyFile {
-    pub(crate) data: Vec<u8>,
+pub struct DirtyFile {
+    pub data: Vec<u8>,
 }
 
 /// Write an empty file manifest (dag-cbor `[]`).
 ///
 /// Stores it in `db` and returns its CID bytes. Works on a plain connection or a
 /// transaction (Transaction derefs to Connection).
-pub(crate) fn store_empty_manifest(db: &rusqlite::Connection) -> Vec<u8> {
+pub fn store_empty_manifest(db: &rusqlite::Connection) -> Vec<u8> {
     let (manifest_data, mc) = dag::encode_file_manifest(&[], 0, 0o644);
     let _ = db.execute(
         "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?1, ?2)",
@@ -76,7 +76,7 @@ pub(crate) fn store_empty_manifest(db: &rusqlite::Connection) -> Vec<u8> {
 }
 
 /// Write a file manifest + its chunks into `db` (a connection or transaction).
-pub(crate) fn store_file_manifest(
+pub fn store_file_manifest(
     db: &rusqlite::Connection,
     chunk_hashes: &[[u8; 32]],
     size: u64,
@@ -91,19 +91,19 @@ pub(crate) fn store_file_manifest(
 }
 
 /// The mountable filesystem state: DB handle, entry tree, and chunk store.
-pub(crate) struct SqliteFs {
-    pub(crate) db: rusqlite::Connection,
-    pub(crate) entries: HashMap<u64, Entry>,
-    pub(crate) ino_gen: InoGen,
-    pub(crate) open_files: HashMap<(u64, u64), DirtyFile>,
-    pub(crate) next_fh: u64,
-    pub(crate) dirty_root: bool,
-    pub(crate) last_auto_commit: std::time::Instant,
+pub struct SqliteFs {
+    pub db: rusqlite::Connection,
+    pub entries: HashMap<u64, Entry>,
+    pub ino_gen: InoGen,
+    pub open_files: HashMap<(u64, u64), DirtyFile>,
+    pub next_fh: u64,
+    pub dirty_root: bool,
+    pub last_auto_commit: std::time::Instant,
 }
 
 impl SqliteFs {
     /// Open (or create) a repo and load the working tree from the `main` ref.
-    pub(crate) fn open(db_path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn open(db_path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let db = rusqlite::Connection::open(db_path)?;
         // WAL + relaxed sync: faster writes, better crash consistency for an
         // embedded DB behind a FUSE writer. journal_mode is persistent; setting it
@@ -215,7 +215,7 @@ impl SqliteFs {
     }
 
     /// Walk DB `refs/commits/directory_index` and build the snapshot tree.
-    pub(crate) fn load_snapshot_tree(
+    pub fn load_snapshot_tree(
         db: &rusqlite::Connection,
         ino_gen: &mut InoGen,
         entries: &mut HashMap<u64, Entry>,
@@ -342,7 +342,7 @@ impl SqliteFs {
     }
 
     /// Resolve a hex hash prefix in `.sqlitefs/c/` to that commit's tree dir.
-    pub(crate) fn resolve_hash_prefix(
+    pub fn resolve_hash_prefix(
         db: &rusqlite::Connection,
         ino_gen: &mut InoGen,
         entries: &mut HashMap<u64, Entry>,
@@ -375,7 +375,7 @@ impl SqliteFs {
     /// Record that the tree changed and reset the debounce timer.
     ///
     /// Sets `dirty_root` so the next `maybe_auto_commit` persists the mutation.
-    pub(crate) fn mark_dirty(&mut self) {
+    pub fn mark_dirty(&mut self) {
         self.dirty_root = true;
         self.last_auto_commit = std::time::Instant::now();
     }
@@ -385,7 +385,7 @@ impl SqliteFs {
     /// Debounced: commits only if dirty and no mutation for 60s. Called from
     /// lookup/create/open — a long-running bulk copy keeps bumping the timer via
     /// `mark_dirty`, so we commit once after it settles, not per op.
-    pub(crate) fn maybe_auto_commit(&mut self) {
+    pub fn maybe_auto_commit(&mut self) {
         if !self.dirty_root {
             return;
         }
@@ -396,12 +396,12 @@ impl SqliteFs {
     }
 
     /// Commit the dirty tree to the 'main' ref.
-    pub(crate) fn commit_dirty_tree(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn commit_dirty_tree(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.commit_as_ref("main")
     }
 
     /// Create a named commit (ref) from the current dirty tree.
-    pub(crate) fn commit_as_ref(
+    pub fn commit_as_ref(
         &mut self,
         ref_name: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -462,7 +462,7 @@ impl SqliteFs {
     ///
     /// Empty files are real files — they need a manifest CID so `build_dir_dag` links
     /// them instead of skipping them (otherwise `touch foo` loses `foo` on commit).
-    pub(crate) fn store_empty_manifest(&mut self) -> Vec<u8> {
+    pub fn store_empty_manifest(&mut self) -> Vec<u8> {
         store_empty_manifest(&self.db)
     }
 
@@ -471,7 +471,7 @@ impl SqliteFs {
     /// Everything happens in ONE transaction, so a crash mid-write rolls back and no
     /// partial file survives. Returns the manifest CID. `mode` is persisted into the
     /// manifest so a chmod survives commit/remount.
-    pub(crate) fn store_released_file(
+    pub fn store_released_file(
         &self,
         data: &[u8],
         chunks: &[([u8; 32], Vec<u8>)],
