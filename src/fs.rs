@@ -17,15 +17,18 @@ pub(crate) const SNAPSHOT_HASH_INODE: u64 = 5;
 /// 60-second auto-commit interval.
 pub(crate) const AUTO_COMMIT_SECS: u64 = 60;
 
+/// Monotonic inode allocator.
 #[derive(Default)]
 pub(crate) struct InoGen {
     next: u64,
 }
 
 impl InoGen {
+    /// Create an allocator starting at `start`.
     fn new(start: u64) -> Self {
         Self { next: start }
     }
+    /// Allocate the next inode.
     pub(crate) fn next(&mut self) -> u64 {
         let n = self.next;
         self.next += 1;
@@ -33,6 +36,7 @@ impl InoGen {
     }
 }
 
+/// An inode: a directory, a file, or a symlink.
 pub(crate) enum Entry {
     Dir {
         children: HashMap<String, u64>,
@@ -52,6 +56,7 @@ pub(crate) enum Entry {
     },
 }
 
+/// A dirty file's in-memory write buffer.
 #[derive(Default)]
 pub(crate) struct DirtyFile {
     pub(crate) data: Vec<u8>,
@@ -85,6 +90,7 @@ pub(crate) fn store_file_manifest(
     mc
 }
 
+/// The mountable filesystem state: DB handle, entry tree, and chunk store.
 pub(crate) struct SqliteFs {
     pub(crate) db: rusqlite::Connection,
     pub(crate) entries: HashMap<u64, Entry>,
@@ -96,6 +102,7 @@ pub(crate) struct SqliteFs {
 }
 
 impl SqliteFs {
+    /// Open (or create) a repo and load the working tree from the `main` ref.
     pub(crate) fn open(db_path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let db = rusqlite::Connection::open(db_path)?;
         // WAL + relaxed sync: faster writes, better crash consistency for an
@@ -283,7 +290,7 @@ impl SqliteFs {
         ino
     }
 
-    /// Load a child CID from chunks — returns a File, Dir, or Symlink entry.
+    /// Load a child CID from chunks into a File, Dir, or Symlink entry.
     fn child_entry_from_cid(db: &rusqlite::Connection, cid: &[u8]) -> Entry {
         let data: Vec<u8> = db
             .query_row(
@@ -334,7 +341,7 @@ impl SqliteFs {
         }
     }
 
-    /// Resolve a hex hash prefix in .sqlitefs/c/ into a Dir with the commit's tree.
+    /// Resolve a hex hash prefix in `.sqlitefs/c/` to that commit's tree dir.
     pub(crate) fn resolve_hash_prefix(
         db: &rusqlite::Connection,
         ino_gen: &mut InoGen,

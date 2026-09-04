@@ -30,34 +30,41 @@ pub struct Cid {
 }
 
 impl Cid {
+    /// Construct a CID directly from a codec and raw hash bytes.
     #[allow(dead_code)]
     pub fn from_raw(codec: u64, hash: [u8; 32]) -> Self {
         Self { codec, hash }
     }
 
+    /// Hash `data` with sha2-256 and construct a CID with `codec`.
     pub fn hash(codec: u64, data: &[u8]) -> Self {
         let hash: [u8; 32] = Sha256::digest(data).into();
         Self { codec, hash }
     }
 
+    /// Hash `data` as a dag-pb CID.
     pub fn hash_dag_pb(data: &[u8]) -> Self {
         Self::hash(DAG_PB, data)
     }
 
+    /// Hash `data` as a raw CID.
     #[allow(dead_code)]
     pub fn hash_raw(data: &[u8]) -> Self {
         Self::hash(RAW, data)
     }
 
+    /// Hash `data` as a dag-cbor CID.
     pub fn hash_dag_cbor(data: &[u8]) -> Self {
         Self::hash(DAG_CBOR, data)
     }
 
+    /// The CID's codec.
     #[allow(dead_code)]
     pub fn codec(&self) -> u64 {
         self.codec
     }
 
+    /// The 32-byte sha2-256 digest.
     pub fn hash_bytes(&self) -> &[u8; 32] {
         &self.hash
     }
@@ -81,6 +88,7 @@ impl Cid {
     }
 }
 
+/// Encode a u64 as a protobuf-style varint.
 fn encode_varint(mut v: u64, buf: &mut Vec<u8>) {
     while v >= 0x80 {
         buf.push((v as u8 & 0x7f) | 0x80);
@@ -141,6 +149,7 @@ pub fn dir_with_links(links: &[(&str, &[u8])]) -> (Vec<u8>, Cid) {
     (data, cid)
 }
 
+/// A single link in a dag-pb directory node.
 struct PbLink {
     hash: Vec<u8>,
     name: String,
@@ -151,6 +160,7 @@ struct PbLink {
 const WIRE_VARINT: u8 = 0;
 const WIRE_LEN: u8 = 2;
 
+/// Combine a field number and wire type into a protobuf tag.
 fn pb_tag(field: u64, wire: u8) -> u64 {
     (field << 3) | u64::from(wire)
 }
@@ -180,6 +190,7 @@ fn encode_pb_node(data: &[u8], links: &[PbLink]) -> Vec<u8> {
     buf
 }
 
+/// Encode a length-delimited field as a wire-type tag + length + bytes.
 fn encode_pb_bytes(field: u64, data: &[u8], buf: &mut Vec<u8>) {
     if data.is_empty() {
         return;
@@ -189,6 +200,7 @@ fn encode_pb_bytes(field: u64, data: &[u8], buf: &mut Vec<u8>) {
     buf.extend_from_slice(data);
 }
 
+/// Encode a varint field as a wire-type tag + value.
 fn encode_pb_varint(field: u64, value: u64, buf: &mut Vec<u8>) {
     if value == 0 {
         return; // default, skip
@@ -197,6 +209,7 @@ fn encode_pb_varint(field: u64, value: u64, buf: &mut Vec<u8>) {
     encode_varint(value, buf);
 }
 
+/// Encode a wire type tag.
 fn encode_pb_wire_type(_wire: u8, tag: u64, buf: &mut Vec<u8>) {
     encode_varint(tag, buf);
 }
@@ -261,6 +274,7 @@ fn cbor_cid(data: &[u8], buf: &mut Vec<u8>) {
     cbor_bytes(data, buf);
 }
 
+/// Encode a CBOR text string.
 fn cbor_string(s: &str, buf: &mut Vec<u8>) {
     let len = s.len() as u64;
     if len <= 23 {
@@ -272,6 +286,7 @@ fn cbor_string(s: &str, buf: &mut Vec<u8>) {
     buf.extend_from_slice(s.as_bytes());
 }
 
+/// Encode a CBOR byte string.
 fn cbor_bytes(data: &[u8], buf: &mut Vec<u8>) {
     let len = data.len() as u64;
     if len <= 23 {
@@ -424,6 +439,7 @@ pub fn decode_dir_links(data: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
     Some(links)
 }
 
+/// Decode an unsigned varint, returning `(value, bytes_consumed)`.
 fn decode_uvarint(data: &[u8]) -> Option<(usize, usize)> {
     let mut v: usize = 0;
     let mut shift = 0u32;
@@ -442,8 +458,10 @@ pub fn is_file_manifest(data: &[u8]) -> bool {
     !data.is_empty() && data[0] >= 0x80 && data[0] <= 0x9f
 }
 
-/// (size, chunk hashes, mode) from a file manifest. `size` is None for the old
-/// all-hash format; `mode` is None for formats without an embedded mode.
+/// `(size, chunk hashes, mode)` from a file manifest.
+///
+/// `size` is None for the old all-hash format; `mode` is None for formats
+/// without an embedded mode.
 pub type FileManifest = (Option<u64>, Vec<[u8; 32]>, Option<u32>);
 
 /// Parse a file manifest CBOR array.
@@ -532,7 +550,7 @@ pub fn reencode_manifest_with_mode(old_data: &[u8], new_mode: u32) -> Option<(Ve
 const V1_CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
 const UNIXFS_FILE: &[u8] = &[0x08, 0x02];
 
-/// One block in a v1-2025 DAG.
+/// One raw or dag-pb block in a v1-2025 DAG.
 #[derive(Clone)]
 pub struct V1Block {
     pub data: Vec<u8>,
@@ -541,7 +559,7 @@ pub struct V1Block {
     pub file_offset: u64,
 }
 
-/// All blocks produced during DAG construction.
+/// The result of a v1-2025 DAG build: the blocks and the root CID.
 pub struct V1Dag {
     pub blocks: Vec<V1Block>,
     pub root: Cid,

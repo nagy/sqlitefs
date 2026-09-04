@@ -23,6 +23,7 @@ use crate::fs::{
 // FUSE trait impl — writable root + read-only .sqlitefs/
 // ---------------------------------------------------------------------------
 
+/// Build a `FileAttr` from an inode, kind, size, and mode.
 fn make_attr(inode: u64, kind: FileType, size: u64, mode: Option<u32>) -> FileAttr {
     let (perm, nlink) = match kind {
         FileType::Directory => (0o755, 2),
@@ -913,6 +914,7 @@ impl SqliteFs {
 // main
 // ---------------------------------------------------------------------------
 
+/// Mount a repo at `mount_point`, taking an exclusive flock for the lifetime.
 fn mount_fs(db_path: &PathBuf, mount_point: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // Take an exclusive flock on the DB file for the mount's lifetime so two
     // processes can't mount the same repo concurrently (which would corrupt it).
@@ -939,6 +941,7 @@ fn mount_fs(db_path: &PathBuf, mount_point: &PathBuf) -> Result<(), Box<dyn std:
     result
 }
 
+/// Parse the CLI and dispatch to the requested command.
 fn main() {
     let cli = cli::Cli::parse();
 

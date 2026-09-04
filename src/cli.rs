@@ -10,6 +10,7 @@ use crate::dag;
 // CLI
 // ---------------------------------------------------------------------------
 
+/// The sqlitefs command line interface.
 #[derive(Parser)]
 #[command(name = "sqlitefs")]
 pub(crate) struct Cli {
@@ -17,6 +18,7 @@ pub(crate) struct Cli {
     pub(crate) command: Command,
 }
 
+/// The subcommand to execute.
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Create a new empty repository.
@@ -29,6 +31,7 @@ pub(crate) enum Command {
     /// Verify repository integrity: every CID reachable from a ref resolves.
     Fsck { db_path: PathBuf },
     /// Rebuild the `directory_index` materialized view from the chunk store.
+    ///
     /// Run once after upgrading a repo created by an older sqlitefs version.
     RebuildIndex { db_path: PathBuf },
     /// List all refs and the commit hash each points at (git-style).
