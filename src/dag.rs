@@ -1,4 +1,4 @@
-// dag.rs — IPLD DAG construction for sqlitefs
+//! IPLD DAG construction for sqlitefs.
 
 use sha2::{Digest, Sha256};
 
@@ -22,7 +22,7 @@ const BASE32: [char; 32] = [
     't', 'u', 'v', 'w', 'x', 'y', 'z', '2', '3', '4', '5', '6', '7',
 ];
 
-/// `CIDv1` with sha2-256 and a given codec.
+/// A `CIDv1` with sha2-256 and a given codec.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cid {
     codec: u64,
@@ -62,13 +62,15 @@ impl Cid {
         &self.hash
     }
 
-    /// `CIDv1` string, base32 (multibase prefix 'b'), no padding — the standard
-    /// human-readable form (e.g. `bafyrei…`). Algorithm matches RFC 4648.
+    /// The standard human-readable form (`bafyrei…`).
+    ///
+    /// `CIDv1` string, base32 (multibase prefix 'b'), no padding. Algorithm
+    /// matches RFC 4648.
     pub fn to_string_base32(&self) -> String {
         base32_encode(&self.to_bytes())
     }
 
-    /// Full CID bytes: 0x01 <codec-varint> 0x12 0x20 <32 hash bytes>
+    /// Full CID bytes: `0x01 <codec-varint> 0x12 0x20 <32 hash bytes>`.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0x01];
         encode_varint(self.codec, &mut buf);
@@ -112,8 +114,9 @@ fn base32_encode(data: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Build an empty `UnixFS` directory dag-pb node.
-/// Returns (`encoded_dag_pb_bytes`, CID).
-/// `PBNode` { Data: [0x08, 0x01] (`UnixFS` Type=Directory), Links: [] }
+///
+/// Returns (`encoded_dag_pb_bytes`, CID). `PBNode` { Data: [0x08, 0x01]
+/// (`UnixFS` Type=Directory), Links: [] }
 pub fn empty_dir() -> (Vec<u8>, Cid) {
     let data = encode_pb_node(&[0x08, 0x01], &[]);
     let cid = Cid::hash_dag_pb(&data);
@@ -121,6 +124,7 @@ pub fn empty_dir() -> (Vec<u8>, Cid) {
 }
 
 /// Build a `UnixFS` directory dag-pb node with children.
+///
 /// Each link: (name, `cid_bytes`, tsize=0).
 #[allow(dead_code)]
 pub fn dir_with_links(links: &[(&str, &[u8])]) -> (Vec<u8>, Cid) {
@@ -151,7 +155,7 @@ fn pb_tag(field: u64, wire: u8) -> u64 {
     (field << 3) | u64::from(wire)
 }
 
-/// Encode a `PBNode`: Data (field 1, bytes) + Links (field 2, repeated message)
+/// Encode a `PBNode`: Data (field 1, bytes) + Links (field 2, repeated message).
 fn encode_pb_node(data: &[u8], links: &[PbLink]) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -201,12 +205,12 @@ fn encode_pb_wire_type(_wire: u8, tag: u64, buf: &mut Vec<u8>) {
 // dag-cbor: minimal CBOR encoder for commit objects
 // ---------------------------------------------------------------------------
 
-/// Encode a dag-cbor map: {parent: `null_or_cid`, tree: cid, timestamp: u64}
-/// `parent_cid` = None encodes as CBOR null.
+/// Encode a dag-cbor commit: `{parent, tree, timestamp}`.
 ///
-/// Canonical dag-cbor: map keys sorted by (length, byte-order) — tree (4),
-/// parent (6), timestamp (9) — and CIDs as tag-42 byte strings (RFC 7049 §3.9,
-/// IPLD dag-cbor spec). Bare bytes would parse but produce a non-canonical CID.
+/// `parent_cid` = None encodes as CBOR null. Canonical dag-cbor: map keys sorted
+/// by (length, byte-order) — tree (4), parent (6), timestamp (9) — and CIDs as
+/// tag-42 byte strings (RFC 7049 §3.9, IPLD dag-cbor spec). Bare bytes would
+/// parse but produce a non-canonical CID.
 pub fn encode_commit(parent_cid: Option<&[u8]>, tree_cid: &[u8], timestamp: u64) -> (Vec<u8>, Cid) {
     let mut buf = Vec::new();
     // CBOR map with 3 items
@@ -248,7 +252,9 @@ pub fn encode_commit(parent_cid: Option<&[u8]>, tree_cid: &[u8], timestamp: u64)
     (buf, cid)
 }
 
-/// Encode a CID as a dag-cbor tagged byte string: tag 42 (0xd8 0x2a) + bytes.
+/// Encode a CID as a dag-cbor tagged byte string.
+///
+/// Tag 42 (0xd8 0x2a) + bytes.
 fn cbor_cid(data: &[u8], buf: &mut Vec<u8>) {
     buf.push(0xd8);
     buf.push(0x2a);
@@ -287,7 +293,8 @@ fn cbor_bytes(data: &[u8], buf: &mut Vec<u8>) {
 // file manifest — CBOR array of chunk hashes
 // ---------------------------------------------------------------------------
 
-/// Encode a file manifest: CBOR array [<size-bytestring>, <mode-bytestring>, hash1..hashN].
+/// Encode a file manifest: CBOR array `[<size>, <mode>, hash1..hashN]`.
+///
 /// The first element is the file size encoded as a byte string (1–8 bytes, never
 /// 32, so it is distinguishable from a chunk hash); the second is the mode as a
 /// byte string (1–4 bytes, never 32, and 0 for the default 0644 so old files
@@ -323,8 +330,9 @@ pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]], size: u64, mode: u32) -> 
 // symlink — dag-pb node with UnixFS type Symlink (0x04)
 // ---------------------------------------------------------------------------
 
-/// Encode a symlink as a dag-pb node. Data = [0x08, 0x04] + target bytes.
-/// No links. `CIDv1` dag-pb.
+/// Encode a symlink as a dag-pb node.
+///
+/// Data = `[0x08, 0x04]` + target bytes, no links. `CIDv1` dag-pb.
 pub fn encode_symlink(target: &str) -> (Vec<u8>, Cid) {
     let mut unixfs = vec![0x08, 0x04];
     unixfs.extend_from_slice(target.as_bytes());
@@ -334,6 +342,7 @@ pub fn encode_symlink(target: &str) -> (Vec<u8>, Cid) {
 }
 
 /// Decode a symlink dag-pb node, returning the target path.
+///
 /// Returns None if the node is not a symlink.
 pub fn decode_symlink(data: &[u8]) -> Option<String> {
     // dag-pb: field 1 (Data) = 0x0a <len> <unixfs_type: 0x08, 0x04> <target...>
@@ -348,16 +357,17 @@ pub fn decode_symlink(data: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(target).into_owned())
 }
 
-/// Peek at a chunk data blob and return true if it's a dag-pb directory node.
+/// Return true if a chunk blob is a dag-pb directory node.
 pub fn is_dir_dag(data: &[u8]) -> bool {
     // dag-pb: field 1 (Data) = 0x0a <len> <unixfs_type: 0x08, 0x01>
     data.len() >= 4 && data[0] == 0x0a && data[1] >= 2 && data[2] == 0x08 && data[3] == 0x01
 }
 
-/// Decode the Links of a dag-pb node into (name, `cid_bytes`) pairs.
-/// Returns None on parse failure. Matches the format produced by `dir_with_links`:
-/// repeated field 2 (0x12) messages, each containing hash (field 1), name
-/// (field 2), tsize (field 3).
+/// Decode the Links of a dag-pb node into `(name, cid_bytes)` pairs.
+///
+/// Returns None on parse failure. Matches the format produced by
+/// `dir_with_links`: repeated field 2 (0x12) messages, each containing hash
+/// (field 1), name (field 2), tsize (field 3).
 pub fn decode_dir_links(data: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
     let mut pos = 0usize;
     let mut links = Vec::new();
@@ -427,7 +437,7 @@ fn decode_uvarint(data: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-/// Peek at a chunk data blob and return true if it's a file manifest (dag-cbor array).
+/// Return true if a chunk blob is a file manifest (dag-cbor array).
 pub fn is_file_manifest(data: &[u8]) -> bool {
     !data.is_empty() && data[0] >= 0x80 && data[0] <= 0x9f
 }
@@ -436,8 +446,9 @@ pub fn is_file_manifest(data: &[u8]) -> bool {
 /// all-hash format; `mode` is None for formats without an embedded mode.
 pub type FileManifest = (Option<u64>, Vec<[u8; 32]>, Option<u32>);
 
-/// Parse a file manifest CBOR array. See `FileManifest` for the shape.
-/// Returns None on parse failure.
+/// Parse a file manifest CBOR array.
+///
+/// See `FileManifest` for the shape. Returns None on parse failure.
 pub fn decode_file_manifest(data: &[u8]) -> Option<FileManifest> {
     if data.is_empty() {
         return None;
@@ -502,10 +513,12 @@ pub fn decode_file_manifest(data: &[u8]) -> Option<FileManifest> {
     Some((size, hashes, mode))
 }
 
-/// Re-encode an existing manifest with a new mode, returning the new bytes and CID.
-/// Used by chmod: the mode lives in the manifest, so changing it must produce a
-/// new manifest chunk (and thus a new CID the tree links). Falls back to
-/// encoding from (size, hashes) when the old format is all-hash (size unknown).
+/// Re-encode an existing manifest with a new mode.
+///
+/// Returns the new bytes and CID. Used by chmod: the mode lives in the manifest,
+/// so changing it must produce a new manifest chunk (and thus a new CID the tree
+/// links). Falls back to encoding from (size, hashes) when the old format is
+/// all-hash (size unknown).
 pub fn reencode_manifest_with_mode(old_data: &[u8], new_mode: u32) -> Option<(Vec<u8>, Cid)> {
     let (size, hashes, _) = decode_file_manifest(old_data)?;
     let size = size?; // old all-hash format can't re-encode (size unknown)
@@ -535,6 +548,7 @@ pub struct V1Dag {
 }
 
 /// Build a v1-2025 `UnixFS` DAG for a file's worth of bytes.
+///
 /// The physical CDC chunks must already be concatenated into `data`.
 pub fn build_v1_2025_dag(data: &[u8]) -> V1Dag {
     if data.is_empty() {

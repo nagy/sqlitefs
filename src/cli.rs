@@ -1,4 +1,4 @@
-// cli.rs — the CLI: repository init, integrity check (fsck), and ref listing.
+//! CLI: repository init, integrity check (fsck), ref listing.
 
 use std::{path::PathBuf, time::UNIX_EPOCH};
 
@@ -131,10 +131,12 @@ pub(crate) fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Verify repository integrity: every CID reachable from a ref (commit, tree,
-/// dir, symlink, file manifest, chunk) must resolve in the chunks table.
-/// Prints each problem and returns Err if any are found. Also the foundation
-/// for GC: chunks reachable from refs are exactly the live set.
+/// Verify repository integrity: every CID reachable from a ref resolves.
+///
+/// Walks each ref's commit chain (commit, tree, dir, symlink, file manifest,
+/// chunk) and checks every CID resolves in the chunks table. Prints each problem
+/// and returns `Err` if any are found. Also the foundation for GC: chunks
+/// reachable from refs are exactly the live set.
 pub(crate) fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
     let mut errors: Vec<String> = Vec::new();
@@ -259,6 +261,7 @@ pub(crate) fn hex_cid(cid: &[u8]) -> String {
 }
 
 /// Rebuild the `directory_index` materialized view from the chunk store.
+///
 /// `directory_index` is a derived cache (ADR-0001) and carries no data that
 /// isn't reachable from refs; this is safe to run on any repo. Needed when the
 /// view gains columns (e.g. `file_mode`) that old repos lack: `mount` reads the
@@ -313,7 +316,8 @@ pub(crate) fn rebuild_index(db_path: &PathBuf) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-/// Recursively insert (parent, name, child, `file_mode`) rows for a dir tree.
+/// Recursively insert `(parent, name, child, file_mode)` rows for a dir tree.
+///
 /// Mirrors `build_dir_dag`: child is a file if its chunk is a file manifest,
 /// a directory if its chunk is a dir dag-pb, a symlink otherwise.
 fn walk_dir_for_index(
@@ -353,8 +357,9 @@ fn walk_dir_for_index(
     Ok(())
 }
 
-/// Read all refs as (name, `commit_hash`) sorted by name. Testable core of show-ref.
-/// Read all refs as (name, `commit_hash`) sorted by name. Testable core of show-ref.
+/// Read all refs as `(name, commit_hash)` sorted by name.
+///
+/// Testable core of show-ref.
 #[allow(clippy::type_complexity)]
 pub(crate) fn list_refs(
     db: &rusqlite::Connection,
@@ -368,8 +373,10 @@ pub(crate) fn list_refs(
     Ok(refs)
 }
 
-/// List all refs with the commit CID each points at, git show-ref style.
-/// Commit CIDs are printed in standard base32 `CIDv1` form (`bafyrei…`).
+/// List all refs with the commit CID each points at.
+///
+/// Git show-ref style. Commit CIDs are printed in standard base32 `CIDv1` form
+/// (`bafyrei…`).
 pub(crate) fn show_ref(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
     for (name, hash) in list_refs(&db)? {

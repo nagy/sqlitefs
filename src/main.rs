@@ -1,4 +1,4 @@
-// sqlitefs — a versioned, content-addressed filesystem in a single SQLite file.
+//! sqlitefs — a versioned, content-addressed filesystem in a single SQLite file.
 
 mod cdc;
 mod cli;
@@ -49,7 +49,9 @@ fn make_attr(inode: u64, kind: FileType, size: u64, mode: Option<u32>) -> FileAt
 }
 
 impl fuser::Filesystem for SqliteFs {
-    /// Called on unmount: persist any dirty state so nothing is lost.
+    /// Persist any dirty state on unmount.
+    ///
+    /// Commits the dirty root so nothing is lost when the filesystem is unmounted.
     fn destroy(&mut self) {
         if self.dirty_root {
             let _ = self.commit_dirty_tree();
@@ -700,10 +702,11 @@ impl fuser::Filesystem for SqliteFs {
         );
     }
 
-    /// Create a hard link: a new directory entry pointing at the same inode.
-    /// The child keeps its manifest CID, so the DAG dedups and `st_ino`
-    /// identity follows the content. Files only — dirs/symlinks are rejected
-    /// (POSIX forbids hard-linking directories).
+    /// Create a hard link at a new directory entry pointing at the same inode.
+    ///
+    /// The child keeps its manifest CID, so the DAG dedups and `st_ino` identity
+    /// follows the content. Files only — dirs/symlinks are rejected (POSIX forbids
+    /// hard-linking directories).
     fn link(
         &mut self,
         _req: &Request,
@@ -867,8 +870,9 @@ impl fuser::Filesystem for SqliteFs {
 }
 
 impl SqliteFs {
-    /// Core hard-link logic, extracted for testing. Returns the linked file's
-    /// (size, mode) for the reply, or a libc errno.
+    /// Core hard-link logic, extracted for testing.
+    ///
+    /// Returns the linked file's `(size, mode)` for the reply, or a libc errno.
     fn link_entry(&mut self, ino: u64, newparent: u64, newname: &OsStr) -> Result<(u64, u32), i32> {
         let Some(newname_str) = newname.to_str() else {
             return Err(libc::EINVAL);

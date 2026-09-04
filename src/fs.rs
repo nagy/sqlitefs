@@ -1,4 +1,4 @@
-// fs.rs — the stateful core: in-memory entry tree, DAG build/commit, chunk store access.
+//! Stateful core: entry tree, DAG build/commit, chunk store.
 
 use std::{collections::HashMap, path::PathBuf, time::UNIX_EPOCH};
 
@@ -57,8 +57,10 @@ pub(crate) struct DirtyFile {
     pub(crate) data: Vec<u8>,
 }
 
-/// Write an empty file manifest (dag-cbor `[]`) into `db` and return its CID bytes.
-/// Works on a plain connection or a transaction (Transaction derefs to Connection).
+/// Write an empty file manifest (dag-cbor `[]`).
+///
+/// Stores it in `db` and returns its CID bytes. Works on a plain connection or a
+/// transaction (Transaction derefs to Connection).
 pub(crate) fn store_empty_manifest(db: &rusqlite::Connection) -> Vec<u8> {
     let (manifest_data, mc) = dag::encode_file_manifest(&[], 0, 0o644);
     let _ = db.execute(
@@ -363,16 +365,19 @@ impl SqliteFs {
         Some(dir_ino)
     }
 
-    /// Auto-commit if dirty and interval elapsed. Called from every FUSE op.
     /// Record that the tree changed and reset the debounce timer.
+    ///
+    /// Sets `dirty_root` so the next `maybe_auto_commit` persists the mutation.
     pub(crate) fn mark_dirty(&mut self) {
         self.dirty_root = true;
         self.last_auto_commit = std::time::Instant::now();
     }
 
-    /// Debounced auto-commit: commit if dirty and no mutation for 60s.
-    /// Called from lookup/create/open — a long-running bulk copy keeps bumping
-    /// the timer via `mark_dirty`, so we commit once after it settles, not per op.
+    /// Commit the dirty tree if it is old enough.
+    ///
+    /// Debounced: commits only if dirty and no mutation for 60s. Called from
+    /// lookup/create/open — a long-running bulk copy keeps bumping the timer via
+    /// `mark_dirty`, so we commit once after it settles, not per op.
     pub(crate) fn maybe_auto_commit(&mut self) {
         if !self.dirty_root {
             return;
@@ -446,16 +451,19 @@ impl SqliteFs {
         Ok(())
     }
 
-    /// Create and store an empty file manifest (dag-cbor `[]`), returning its bytes.
+    /// Create and store an empty file manifest, returning its bytes.
+    ///
     /// Empty files are real files — they need a manifest CID so `build_dir_dag` links
     /// them instead of skipping them (otherwise `touch foo` loses `foo` on commit).
     pub(crate) fn store_empty_manifest(&mut self) -> Vec<u8> {
         store_empty_manifest(&self.db)
     }
 
-    /// Store a released file's chunks + manifest + v1-2025 blocks in ONE transaction,
-    /// returning the manifest CID. A crash mid-write rolls back, so no partial file.
-    /// `mode` is persisted into the manifest so a chmod survives commit/remount.
+    /// Store a released file's chunks + manifest + v1-2025 blocks.
+    ///
+    /// Everything happens in ONE transaction, so a crash mid-write rolls back and no
+    /// partial file survives. Returns the manifest CID. `mode` is persisted into the
+    /// manifest so a chmod survives commit/remount.
     pub(crate) fn store_released_file(
         &self,
         data: &[u8],
@@ -528,6 +536,7 @@ impl SqliteFs {
     }
 
     /// Recursively build a dag-pb directory node for `inode` and its children.
+    ///
     /// Returns (`encoded_dag_pb`, Cid). Also inserts file manifests + chunks into DB
     /// and populates `directory_index`.
     fn build_dir_dag(
