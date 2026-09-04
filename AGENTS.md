@@ -12,7 +12,7 @@ Built in Rust.
 ├── AGENTS.md            # this file
 ├── Cargo.toml
 ├── Cargo.lock
-├── flake.nix            # Nix flake: packages, devShells, checks (crate2nix)
+├── flake.nix            # Nix flake: packages, devShells, checks (crane)
 ├── flake.lock
 ├── test/
 │   └── default.nix      # NixOS VM test (nixos-lib.runTest, wired via checks.sqlitefs)

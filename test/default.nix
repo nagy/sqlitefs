@@ -16,7 +16,7 @@ nixos-lib.runTest {
       environment.systemPackages = [
         # Run the VM test against a DEBUG build so debug_assert!s (ours and
         # fuser's) are actually exercised; the main build stays release.
-        (sqlitefs.overrideAttrs { cargoBuildType = "debug"; })
+        sqlitefs
         pkgs.fuse3
         pkgs.sqlite
       ];
