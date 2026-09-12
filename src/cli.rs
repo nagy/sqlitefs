@@ -432,7 +432,10 @@ pub enum Node {
 }
 
 /// Fetch a chunk by CID bytes.
-fn load_chunk(db: &rusqlite::Connection, cid: &[u8]) -> Result<Vec<u8>, String> {
+///
+/// # Errors
+/// When the chunk is missing from the store.
+pub fn load_chunk(db: &rusqlite::Connection, cid: &[u8]) -> Result<Vec<u8>, String> {
     db.query_row(
         "SELECT data FROM chunks WHERE hash = ?1",
         rusqlite::params![cid],
@@ -442,7 +445,10 @@ fn load_chunk(db: &rusqlite::Connection, cid: &[u8]) -> Result<Vec<u8>, String> 
 }
 
 /// Classify a chunk's bytes into a `Node`, loading the file size on demand.
-fn classify(db: &rusqlite::Connection, cid: &[u8], data: Vec<u8>) -> Result<Node, String> {
+///
+/// # Errors
+/// When the chunk bytes match no known DAG node type.
+pub fn classify(db: &rusqlite::Connection, cid: &[u8], data: Vec<u8>) -> Result<Node, String> {
     if let Some(target) = dag::decode_symlink(&data) {
         return Ok(Node::Symlink(target));
     }
@@ -477,20 +483,36 @@ fn classify(db: &rusqlite::Connection, cid: &[u8], data: Vec<u8>) -> Result<Node
 /// When the `main` ref or its commit is missing, a chunk is missing, or the
 /// path does not resolve.
 pub fn resolve_ro(db: &rusqlite::Connection, path: &str) -> Result<Node, String> {
+    resolve_ref_ro(db, "main", path)
+}
+
+/// Resolve a repo path against an arbitrary ref's tree, read-only.
+///
+/// Like [`resolve_ro`], but walks the tree the given ref points at (e.g. a
+/// tagged snapshot), not just `main`.
+///
+/// # Errors
+/// When the ref or its commit is missing, a chunk is missing, or the path does
+/// not resolve.
+pub fn resolve_ref_ro(
+    db: &rusqlite::Connection,
+    ref_name: &str,
+    path: &str,
+) -> Result<Node, String> {
     let commit_hash: Vec<u8> = db
         .query_row(
-            "SELECT commit_hash FROM refs WHERE name = 'main'",
-            [],
+            "SELECT commit_hash FROM refs WHERE name = ?1",
+            rusqlite::params![ref_name],
             |r| r.get(0),
         )
-        .map_err(|_| "no 'main' ref in repository".to_string())?;
+        .map_err(|_| format!("no '{ref_name}' ref in repository"))?;
     let tree_cid: Vec<u8> = db
         .query_row(
             "SELECT tree_cid FROM commits WHERE hash = ?1",
             rusqlite::params![commit_hash],
             |r| r.get(0),
         )
-        .map_err(|_| "main ref points at a missing commit".to_string())?;
+        .map_err(|_| format!("'{ref_name}' ref points at a missing commit"))?;
 
     let mut node = classify(db, &tree_cid, load_chunk(db, &tree_cid)?)?;
     for comp in path.split('/').filter(|c| !c.is_empty() && *c != ".") {
@@ -510,7 +532,10 @@ pub fn resolve_ro(db: &rusqlite::Connection, path: &str) -> Result<Node, String>
 }
 
 /// Assemble a file's content from its manifest.
-fn read_file(db: &rusqlite::Connection, manifest: &[u8]) -> Result<Vec<u8>, String> {
+///
+/// # Errors
+/// When the manifest is not a file manifest or a chunk is missing.
+pub fn read_file(db: &rusqlite::Connection, manifest: &[u8]) -> Result<Vec<u8>, String> {
     let Some((_, hashes, _)) = dag::decode_file_manifest(manifest) else {
         return Err("not a file manifest".to_string());
     };

@@ -10,11 +10,12 @@ use fuser::{
 };
 use libc::{ENOENT, ENOTDIR};
 
-use crate::cdc;
-use crate::dag;
-use crate::fs::{
-    DirtyFile, Entry, ROOT_INODE, SNAPSHOT_DIR_INODE, SNAPSHOT_HASH_INODE, SNAPSHOT_REFS_INODE,
-    SNAPSHOT_TAG_INODE, SqliteFs,
+use crate::{
+    cdc, dag,
+    fs::{
+        DirtyFile, Entry, ROOT_INODE, SNAPSHOT_DIR_INODE, SNAPSHOT_HASH_INODE, SNAPSHOT_REFS_INODE,
+        SNAPSHOT_TAG_INODE, SqliteFs,
+    },
 };
 
 fn make_attr(inode: u64, kind: FileType, size: u64, mode: Option<u32>) -> FileAttr {

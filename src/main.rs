@@ -7,7 +7,6 @@ use std::{os::fd::AsRawFd, path::PathBuf};
 
 use clap::{CommandFactory, Parser};
 use fuser::MountOption;
-
 use sqlitefs::{cli, fs::SqliteFs};
 
 // ---------------------------------------------------------------------------

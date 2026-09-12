@@ -14,6 +14,8 @@ the repository and the mountable volume.
   =.sqlitefs/refs/<name>/=, hash access via =.sqlitefs/c/<hash-prefix>/=.
 - Symlinks and hard links (files only).
 - Integrity checking: =fsck= verifies every CID reachable from a ref.
+- Read-only Emacs dynamic module: browse/cat repos in Emacs without mounting
+  (=emacs/sqlitefs.el=, dired-like browser), backed by the =sqlitefs= cdylib.
 
 * Usage
 
@@ -50,6 +52,18 @@ sqlitefs cp repo.db a.txt b.txt
 
 # rename inside the repo
 sqlitefs mv repo.db docs docs-old
+#+end_src
+
+* Emacs
+
+#+begin_src emacs-lisp
+;; module auto-located via load-path (Nix: nix run .#emacs-sqlitefs),
+;; or build it first: cargo build --features emacs
+(require 'sqlitefs)
+
+(sqlitefs-dired "repo.db")                     ; dired-like browsing (main ref)
+(sqlitefs-visit "repo.db" "docs/readme.md")    ; read-only file buffer
+(sqlitefs-show-refs "repo.db")                 ; refs with commit CIDs
 #+end_src
 
 * Development

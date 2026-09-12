@@ -102,6 +102,105 @@
             }
           );
 
+          # Emacs module build: same crate with the `emacs` feature on — the
+          # cdylib (libsqlitefs.so) is the loadable dynamic module. The feature
+          # adds the `emacs` crate to the dep graph, so this build carries its
+          # own cargoArtifacts (a superset of the default set).
+          cargoArtifactsEmacs = craneLib.buildDepsOnly {
+            inherit src nativeBuildInputs;
+            buildInputs = libInputs;
+            cargoExtraArgs = "--features emacs";
+          };
+
+          sqlitefs-emacs = craneLib.buildPackage (
+            commonArgs
+            // {
+              inherit cargoArtifactsEmacs;
+              pname = "sqlitefs-emacs";
+              version = "0.1.0";
+              cargoExtraArgs = "--features emacs";
+              meta = {
+                description = "Emacs dynamic module exposing the sqlitefs library";
+                platforms = lib.platforms.linux;
+              };
+            }
+          );
+
+          # emacs-sqlitefs: the elisp package (emacs/sqlitefs.el) plus the
+          # dynamic module in one share/emacs/site-lisp tree. Byte-compiles
+          # with warnings-as-errors and generates autoloads; the ERT suite
+          # runs as an install-check (installCheckPhase, not checkPhase:
+          # stdenv runs checks before install, so plain checkPhase would see
+          # an empty $out). Wired into checks, so `nix flake check` covers
+          # the Emacs integration end to end.
+          emacs-sqlitefs = pkgs.stdenv.mkDerivation {
+            pname = "emacs-sqlitefs";
+            version = "0.1.0";
+
+            # Elisp sources + ERT suite only.
+            src = lib.cleanSourceWith {
+              src = ./.;
+              filter =
+                path: type:
+                (type == "directory" && (lib.hasInfix "/emacs" path || lib.hasInfix "/test" path))
+                || (type == "regular" && (lib.hasInfix "/emacs/" path || lib.hasInfix "/test/" path));
+            };
+
+            nativeBuildInputs = [
+              pkgs.emacs
+              sqlitefs-emacs
+            ];
+
+            buildPhase = ''
+              runHook preBuild
+
+              # Module library next to the elisp so `sqlitefs--locate-module'
+              # finds it via `load-path' (also during byte-compilation).
+              install -Dm555 ${sqlitefs-emacs}/lib/libsqlitefs.so \
+                emacs/libsqlitefs.so
+
+              # Byte-compile with warnings as errors.
+              for file in emacs/*.el; do
+                emacs --batch -L emacs \
+                  --eval "(setq byte-compile-error-on-warn t)" \
+                  -f batch-byte-compile "$file"
+              done
+
+              # Autoload stamps from the ;;;###autoload cookies.
+              emacs --batch -L emacs -l loaddefs-gen \
+                --eval '(loaddefs-generate "emacs" "emacs/loaddefs.el")'
+
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/share/emacs/site-lisp
+              # emacs/*.el covers the generated loaddefs.el too.
+              install -m644 emacs/*.el emacs/*.elc \
+                emacs/libsqlitefs.so -t $out/share/emacs/site-lisp
+              runHook postInstall
+            '';
+
+            # ERT suite runs against the *installed* package (compiled elisp
+            # + module library + generated autoloads), with the sqlitefs CLI
+            # from the module build as the repo fixture driver.
+            doInstallCheck = true;
+            installCheckPhase = ''
+              runHook preInstallCheck
+              export SQLITEFS_TEST_BIN=${sqlitefs-emacs}/bin/sqlitefs
+              export SQLITEFS_TEST_MODULE=$out/share/emacs/site-lisp/libsqlitefs.so
+              emacs --batch -L $out/share/emacs/site-lisp \
+                -l test/emacs-module-tests.el
+              runHook postInstallCheck
+            '';
+
+            meta = {
+              description = "Emacs interface to sqlitefs repositories (module + elisp)";
+              platforms = lib.platforms.linux;
+            };
+          };
+
           # The VM test needs a debug build of the *installed* binary.
           vmTest = import ./test/default.nix {
             inherit pkgs lib;
@@ -110,9 +209,12 @@
         in
         {
           packages.sqlitefs = sqlitefs;
+          packages.sqlitefs-emacs = sqlitefs-emacs;
+          packages.emacs-sqlitefs = emacs-sqlitefs;
           packages.default = config.packages.sqlitefs;
 
           checks.sqlitefs = vmTest;
+          checks.emacs-sqlitefs = emacs-sqlitefs;
 
           checks.default = craneLib.cargoTest (
             commonArgs
@@ -137,6 +239,7 @@
             packages = [
               pkgs.rustfmt
               pkgs.clippy
+              pkgs.emacs
               pkgs.installShellFiles
               pkgs.pkg-config
               config.treefmt.build.wrapper

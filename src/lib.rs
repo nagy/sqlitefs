@@ -2,12 +2,14 @@
 //!
 //! Library crate: the entry tree, DAG building/committing, chunk store, and
 //! CLI helpers. The FUSE frontend lives in the binary (`src/main.rs`); the
-//! Emacs dynamic module frontend lives in `emacs-module/` (feature `emacs`
-//! of this crate keeps the default build free of that dependency).
+//! Emacs dynamic-module frontend is `emacs_module.rs` (feature `emacs` keeps
+//! the default build free of that dependency).
 
 pub mod cdc;
 pub mod cli;
 pub mod dag;
+#[cfg(feature = "emacs")]
+pub mod emacs_module;
 pub mod fs;
 pub mod fuse;
 #[cfg(test)]
@@ -537,5 +539,176 @@ mod tests {
             let _ = write!(s, "{x:02x}");
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod cli_ro_tests {
+    use std::path::PathBuf;
+
+    use crate::{
+        cdc,
+        cli::{Node, init_repo},
+        fs::{Entry, ROOT_INODE, SqliteFs},
+    };
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sqlitefs-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    /// Build a repo with: main ref = dir containing hello.txt (file), sub/
+    /// (dir with run.sh), link.txt (symlink to hello.txt); plus a second ref
+    /// "v1" pointing at an empty tree.
+    fn build_repo(path: &PathBuf) {
+        init_repo(path).unwrap();
+        let mut fs = SqliteFs::open(path).unwrap();
+
+        // hello.txt
+        let data = b"hello emacs\n".to_vec();
+        let chunks = cdc::chunk_file(&data);
+        let mc = fs.store_released_file(&data, &chunks, 0o644).unwrap();
+        let f_ino = fs.ino_gen.next();
+        fs.entries.insert(
+            f_ino,
+            Entry::File {
+                size: data.len() as u64,
+                mode: 0o644,
+                manifest_cid: Some(mc.to_bytes()),
+                v1_2025_cid: None,
+            },
+        );
+        if let Some(Entry::Dir { children, .. }) = fs.entries.get_mut(&ROOT_INODE) {
+            children.insert("hello.txt".to_string(), f_ino);
+        }
+
+        // sub/run.sh
+        let script = b"#!/bin/sh\necho hi\n".to_vec();
+        let chunks = cdc::chunk_file(&script);
+        let mc = fs.store_released_file(&script, &chunks, 0o755).unwrap();
+        let s_ino = fs.ino_gen.next();
+        fs.entries.insert(
+            s_ino,
+            Entry::File {
+                size: script.len() as u64,
+                mode: 0o755,
+                manifest_cid: Some(mc.to_bytes()),
+                v1_2025_cid: None,
+            },
+        );
+        let sub_ino = fs.ino_gen.next();
+        fs.entries.insert(
+            sub_ino,
+            Entry::Dir {
+                children: std::collections::HashMap::from([("run.sh".to_string(), s_ino)]),
+                parent: ROOT_INODE,
+            },
+        );
+        if let Some(Entry::Dir { children, .. }) = fs.entries.get_mut(&ROOT_INODE) {
+            children.insert("sub".to_string(), sub_ino);
+        }
+
+        // link.txt -> hello.txt (commit_as_ref stores the symlink manifest)
+        let sym_ino = fs.ino_gen.next();
+        fs.entries.insert(
+            sym_ino,
+            Entry::Symlink {
+                target: "hello.txt".to_string(),
+            },
+        );
+        if let Some(Entry::Dir { children, .. }) = fs.entries.get_mut(&ROOT_INODE) {
+            children.insert("link.txt".to_string(), sym_ino);
+        }
+
+        fs.dirty_root = true;
+        fs.commit_as_ref("main").unwrap();
+
+        // v1 = empty tree on top of nothing (new commit, empty dir).
+        let mut fs2 = SqliteFs::open(path).unwrap();
+        fs2.dirty_root = true;
+        fs2.commit_as_ref("v1").unwrap();
+    }
+
+    #[test]
+    fn test_resolve_ref_ro_root_is_dir() {
+        let path = temp_db_path("resolve_root.db");
+        build_repo(&path);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let node = crate::cli::resolve_ref_ro(&db, "main", "").unwrap();
+        match node {
+            Node::Dir(links) => {
+                let names: Vec<&str> = links.iter().map(|(n, _)| n.as_str()).collect();
+                assert!(names.contains(&"hello.txt"));
+                assert!(names.contains(&"sub"));
+                assert!(names.contains(&"link.txt"));
+            }
+            _ => panic!("root should be a dir"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_resolve_ref_ro_file_size_and_nested_dir() {
+        let path = temp_db_path("resolve_file.db");
+        build_repo(&path);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        match crate::cli::resolve_ref_ro(&db, "main", "hello.txt").unwrap() {
+            Node::File { size, manifest } => {
+                assert_eq!(size, 12);
+                assert!(!manifest.is_empty());
+            }
+            _ => panic!("hello.txt should be a file"),
+        }
+        match crate::cli::resolve_ref_ro(&db, "main", "sub/run.sh").unwrap() {
+            Node::File { size, .. } => assert_eq!(size, 18),
+            _ => panic!("sub/run.sh should be a file"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_resolve_ref_ro_symlink() {
+        let path = temp_db_path("resolve_symlink.db");
+        build_repo(&path);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        match crate::cli::resolve_ref_ro(&db, "main", "link.txt").unwrap() {
+            Node::Symlink(target) => assert_eq!(target, "hello.txt"),
+            _ => panic!("link.txt should be a symlink"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_resolve_ref_ro_other_ref_and_errors() {
+        let path = temp_db_path("resolve_refs.db");
+        build_repo(&path);
+        let db = rusqlite::Connection::open(&path).unwrap();
+
+        // v1 was committed on top of main (reload keeps the tree), so it has
+        // the same files — proving an arbitrary (non-main) ref is walkable.
+        match crate::cli::resolve_ref_ro(&db, "v1", "hello.txt").unwrap() {
+            Node::File { size, .. } => assert_eq!(size, 12),
+            _ => panic!("v1 hello.txt should be a file"),
+        }
+
+        // Missing ref and missing path must error, not panic.
+        assert!(crate::cli::resolve_ref_ro(&db, "nope", "").is_err());
+        assert!(crate::cli::resolve_ref_ro(&db, "main", "no/such/file").is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_read_file_roundtrip() {
+        let path = temp_db_path("read_file.db");
+        build_repo(&path);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let manifest = match crate::cli::resolve_ref_ro(&db, "main", "hello.txt").unwrap() {
+            Node::File { manifest, .. } => manifest,
+            _ => panic!("expected file"),
+        };
+        let content = crate::cli::read_file(&db, &manifest).unwrap();
+        assert_eq!(content, b"hello emacs\n");
+        let _ = std::fs::remove_file(&path);
     }
 }

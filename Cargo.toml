@@ -3,6 +3,15 @@ name = "sqlitefs"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+# Emacs dynamic-module frontend (src/emacs_module.rs): pulls in the `emacs`
+# crate and makes the cdylib loadable via `module-load`. Default build stays
+# FUSE/CLI-only.
+emacs = ["dep:emacs"]
+
 [lints.clippy]
 # Run pedantic by default (no `-W clippy::pedantic` needed), but allow the
 # intentional cases: bounded `as` casts in varint/base32 encoding and FUSE
@@ -20,6 +29,7 @@ items_after_statements = "allow"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+emacs = { version = "0.19", optional = true }
 fastcdc = "4"
 fuser = "0.15"
 libc = "0.2"

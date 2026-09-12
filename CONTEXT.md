@@ -55,3 +55,7 @@ _Avoid_: Working tree, staging area, uncommitted changes
 **Host path**:
 A path on the real filesystem, as opposed to a path inside the repository. In `sqlitefs cp`, recognized by styling (`/abs`, `./x`, `../x`, `~/x`); bare paths resolve in the repository first (falling back to the host). Repository→host is an extract, host→repository an import, repository→repository a manifest-link copy.
 _Avoid_: External path, local path
+
+**Emacs module**:
+A read-only frontend compiled into the `sqlitefs` cdylib (feature `emacs`), loaded into Emacs via `module-load`. Exposes refs, directory listings, file reads, commit logs, and the function catalog as Elisp functions (`sqlitefs-*`); each call opens the repository read-only and resolves the committed tree — no in-memory state, no writes, safe next to a live FUSE mount. The catalog (`sqlitefs-catalog`) is the single source of truth for the API surface, pinned by an ERT parity test.
+_Avoid_: Emacs package (the Elisp side is a frontend, not a package dependency), sqlite binding
