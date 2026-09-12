@@ -19,7 +19,9 @@ Built in Rust.
 ├── .gitignore
 ├── LICENSE              # AGPL-3.0
 ├── src/
-│   ├── main.rs          # entry: FUSE trait impl (writable root + .sqlitefs/ snapshots + tag + rename + symlinks + hard links)
+│   ├── lib.rs           # library crate: modules + unit tests (core shared by bin and Emacs module)
+│   ├── main.rs          # entry: CLI parse + mount dispatch (flock, fuser::mount2)
+│   ├── fuse.rs          # FUSE trait impl (writable root + .sqlitefs/ snapshots + tag + rename + symlinks + hard links)
 │   ├── fs.rs            # stateful core: Entry tree, SqliteFs, DAG build/commit, chunk store
 │   ├── cli.rs           # CLI (init, mount, fsck, rebuild-index, show-ref, ls, cat, cp, mv) + repo-level ops
 │   ├── dag.rs           # CIDv1, dag-pb, dag-cbor, v1-2025 UnixFS DAG builder
