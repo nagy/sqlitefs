@@ -51,3 +51,7 @@ _Avoid_: Symlink, alias, CID-derived inode
 **Dirty state**:
 In-memory filesystem modifications between commits. Accumulated as FUSE writes, hashed on `close()`. Lost on crash. Only committed state is persistent.
 _Avoid_: Working tree, staging area, uncommitted changes
+
+**Host path**:
+A path on the real filesystem, as opposed to a path inside the repository. In `sqlitefs cp`, recognized by styling (`/abs`, `./x`, `../x`, `~/x`); bare paths resolve in the repository first (falling back to the host). Repository→host is an extract, host→repository an import, repository→repository a manifest-link copy.
+_Avoid_: External path, local path

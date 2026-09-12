@@ -401,10 +401,7 @@ impl SqliteFs {
     }
 
     /// Create a named commit (ref) from the current dirty tree.
-    pub fn commit_as_ref(
-        &mut self,
-        ref_name: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn commit_as_ref(&mut self, ref_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Everything from the DAG build to the ref update happens in ONE transaction:
         // a crash mid-commit can no longer leave orphan chunks/commits or a ref
         // pointing at a missing commit. Single-threaded FUSE ops → unchecked is fine.

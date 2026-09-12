@@ -144,6 +144,42 @@ nixos-lib.runTest {
     # ---- fsck after all ops (repo must be healthy) ----
     machine.succeed("sqlitefs fsck /tmp/repo/test.db")
 
+    # ---- CLI access while mounted (interop) ----
+    # Reads go through the DB; writes commit to the DB, but a running mount
+    # keeps its own in-memory tree, so CLI changes are only visible via CLI.
+    machine.succeed("sqlitefs cat /tmp/repo/test.db subdir/renamed.txt | grep 'new content'")
+    machine.succeed("echo 'cli import' > /tmp/cli-import.txt")
+    machine.succeed("sqlitefs cp /tmp/repo/test.db /tmp/cli-import.txt docs/imported.txt")
+    machine.succeed("sqlitefs cat /tmp/repo/test.db docs/imported.txt | grep 'cli import'")
+    machine.succeed("sqlitefs cp /tmp/repo/test.db docs/imported.txt /tmp/extracted-cli.txt")
+    machine.succeed("grep 'cli import' /tmp/extracted-cli.txt")
+    machine.succeed("sqlitefs mv /tmp/repo/test.db docs/imported.txt imported-mv.md")
+    machine.succeed("sqlitefs cat /tmp/repo/test.db imported-mv.md | grep 'cli import'")
+    machine.fail("sqlitefs cat /tmp/repo/test.db docs/imported.txt")
+    machine.succeed("sqlitefs fsck /tmp/repo/test.db")
+
+    # ---- pure-CLI repo (no FUSE at all) ----
+    machine.succeed("sqlitefs init /tmp/repo/cli.db")
+    machine.succeed("echo 'cli hello' > /tmp/cli-src.txt")
+    # import to root and into a missing dir (mkdir -p semantics)
+    machine.succeed("sqlitefs cp /tmp/repo/cli.db /tmp/cli-src.txt note.txt")
+    machine.succeed("sqlitefs cp /tmp/repo/cli.db /tmp/cli-src.txt docs/guide.md")
+    out = machine.succeed("sqlitefs ls /tmp/repo/cli.db")
+    assert "note.txt" in out, f"ls missing note.txt: {out}"
+    assert "docs/" in out, f"ls missing docs/: {out}"
+    machine.succeed("sqlitefs cat /tmp/repo/cli.db docs/guide.md | grep 'cli hello'")
+    # extract back out (dst is host-styled via absolute path)
+    machine.succeed("sqlitefs cp /tmp/repo/cli.db note.txt /tmp/out.txt")
+    machine.succeed("grep 'cli hello' /tmp/out.txt")
+    # in-repo copy (dst is bare) + mv
+    machine.succeed("sqlitefs cp /tmp/repo/cli.db note.txt note-copy.txt")
+    machine.succeed("sqlitefs mv /tmp/repo/cli.db note-copy.txt docs/renamed.md")
+    machine.fail("sqlitefs cat /tmp/repo/cli.db note-copy.txt")
+    machine.succeed("sqlitefs cat /tmp/repo/cli.db docs/renamed.md | grep 'cli hello'")
+    # .sqlitefs is not reachable via the CLI
+    machine.fail("sqlitefs cat /tmp/repo/cli.db .sqlitefs/refs/main")
+    machine.succeed("sqlitefs fsck /tmp/repo/cli.db")
+
     # ---- clean up ----
     machine.succeed("fusermount3 -u /tmp/mnt")
   '';

@@ -21,7 +21,7 @@ Built in Rust.
 ├── src/
 │   ├── main.rs          # entry: FUSE trait impl (writable root + .sqlitefs/ snapshots + tag + rename + symlinks + hard links)
 │   ├── fs.rs            # stateful core: Entry tree, SqliteFs, DAG build/commit, chunk store
-│   ├── cli.rs           # CLI (init, mount, fsck, rebuild-index, show-ref) + repo-level ops
+│   ├── cli.rs           # CLI (init, mount, fsck, rebuild-index, show-ref, ls, cat, cp, mv) + repo-level ops
 │   ├── dag.rs           # CIDv1, dag-pb, dag-cbor, v1-2025 UnixFS DAG builder
 │   └── cdc.rs           # content-defined chunking (FastCDC v2020 + SHA-256)
 └── docs/
@@ -73,6 +73,14 @@ Summary:
 |`getxattr`, `listxattr`                     |Stub (no xattrs)                           |
 |`setattr` (truncate-to-zero, chmod)         |✓ (auto-commit; uid/gid/utimes ignored)    |
 |`flush`, `fsync`                            |Not needed (no-op ok)                      |
+
+## CLI file access (no FUSE)
+
+`sqlitefs ls/cat/cp/mv <db> <path>` read the committed `main` tree directly
+(via `refs` → `commits` → `directory_index`); `cp`/`mv` reuse the `SqliteFs`
+entry tree and commit per command. The `.sqlitefs/` namespace is not reachable.
+Caveat: CLI mutations commit to the DB, but a concurrently running FUSE mount
+keeps its own in-memory tree — it will not see CLI changes until remounted.
 
 ## Snapshot model
 

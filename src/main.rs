@@ -954,6 +954,18 @@ fn main() {
         cli::Command::Fsck { db_path } => cli::fsck_repo(&db_path),
         cli::Command::ShowRef { db_path } => cli::show_ref(&db_path),
         cli::Command::RebuildIndex { db_path } => cli::rebuild_index(&db_path),
+        cli::Command::Ls { db_path, path } => cli::ls(&db_path, path.as_deref()),
+        cli::Command::Cat { db_path, path } => cli::cat(&db_path, &path),
+        cli::Command::Cp {
+            db_path,
+            ref src,
+            ref dst,
+        } => cli::cp(&db_path, src, dst),
+        cli::Command::Mv {
+            db_path,
+            ref src,
+            ref dst,
+        } => cli::mv(&db_path, src, dst),
         cli::Command::Completions { shell } => {
             let mut cmd = cli::Cli::command();
             let name = cmd.get_name().to_string();

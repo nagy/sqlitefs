@@ -35,6 +35,21 @@ sqlitefs rebuild-index repo.db
 
 # shell completions
 sqlitefs completions bash
+
+# list/cat files without mounting
+sqlitefs ls repo.db
+sqlitefs ls repo.db docs/
+sqlitefs cat repo.db docs/guide.md
+
+# copy: host→repo imports (parent dirs are created),
+# repo→host extracts (host paths are /abs, ./x, ../x or ~/x),
+# repo→repo copies by manifest link (chunks dedup)
+sqlitefs cp repo.db ./out.md docs/readme.md
+sqlitefs cp repo.db docs/readme.md ./out.md
+sqlitefs cp repo.db a.txt b.txt
+
+# rename inside the repo
+sqlitefs mv repo.db docs docs-old
 #+end_src
 
 * Development
