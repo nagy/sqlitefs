@@ -50,8 +50,8 @@ Summary:
 
 ## Tooling
 
-- **Build**: `nix build .#sqlitefs` (also `nix flake check`, `nix develop`).
-  Dev-shell tools come from `devShells.default`; the VM test runs via `nix flake check`.
+- **Build**: `nix build .#sqlitefs` (also `nix flake check`). Dev-shell
+  tools come from `devShells.default`; the VM test runs via `nix flake check`.
 - **Docs**: `nix build .#sqlitefs-doc` — static rustdoc HTML (offline browse: serve
   `share/doc/` with `python3 -m http.server`). Doctests run as `checks.doctests`
   (`nix flake check` covers them).
@@ -143,7 +143,7 @@ When working on this repo, agents MUST:
 3. **Do not add dependencies lightly** — run through the ponytail filter first.
    Prefer stdlib, minimal crates.
 4. **Treat `cargo fmt` as mandatory** before every commit.
-5. **Build with `nix develop -c cargo build`** — `cargo fmt && cargo clippy` too.
+5. **Build with `cargo build`** — `cargo fmt && cargo clippy` too.
 6. **Git commits without GPG signing** — use `--no-gpg-sign`.
 7. **Keep the Remaining work list up to date** — add new outstanding work as numbered entries.
    Remove finished entries entirely (never cross out, never mark done).
