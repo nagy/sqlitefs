@@ -299,6 +299,15 @@ pub fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Format a CID's bytes as hex for error messages.
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::cli::hex_cid;
+///
+/// assert_eq!(hex_cid(&[0x01, 0xab]), "01ab");
+/// assert_eq!(hex_cid(b""), "");
+/// ```
 #[must_use]
 pub fn hex_cid(cid: &[u8]) -> String {
     let mut s = String::with_capacity(cid.len() * 2);

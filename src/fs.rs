@@ -29,6 +29,20 @@ impl InoGen {
         Self { next: start }
     }
     /// Allocate the next inode number.
+    ///
+    /// # Examples
+    ///
+    /// Inode numbers are handed out in strictly increasing order:
+    ///
+    /// ```
+    /// use sqlitefs::fs::InoGen;
+    ///
+    /// let mut allocs = InoGen::default();
+    /// let a = allocs.alloc();
+    /// let b = allocs.alloc();
+    /// assert!(a < b);
+    /// assert_ne!(a, allocs.alloc());
+    /// ```
     #[must_use]
     pub fn alloc(&mut self) -> u64 {
         let n = self.next;

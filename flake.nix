@@ -99,6 +99,7 @@
               inherit cargoArtifactsDebug;
               postInstall = completionInstall;
               env.CARGO_PROFILE = "dev";
+              meta.description = "sqlitefs debug build (debug_assert!s live, used by the VM test)";
             }
           );
 
@@ -221,9 +222,16 @@
           };
 
           # The VM test needs a debug build of the *installed* binary.
-          vmTest = import ./test/default.nix {
+          # runTest's `meta` submodule has no `description` option, so the
+          # description is overlaid onto the test derivation here instead.
+          vmTestRaw = import ./test/default.nix {
             inherit pkgs lib;
             sqlitefs = sqlitefsDebug;
+          };
+          vmTest = vmTestRaw // {
+            meta = (vmTestRaw.meta or { }) // {
+              description = "sqlitefs NixOS VM test (FUSE mount, snapshots, CLI interop)";
+            };
           };
         in
         {
@@ -241,6 +249,7 @@
             commonArgs
             // {
               inherit cargoArtifacts;
+              meta.description = "sqlitefs test suite";
             }
           );
 

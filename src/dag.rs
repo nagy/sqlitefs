@@ -94,12 +94,45 @@ impl Cid {
     ///
     /// `CIDv1` string, base32 (multibase prefix 'b'), no padding. Algorithm
     /// matches RFC 4648.
+    ///
+    /// # Examples
+    ///
+    /// The string carries the multibase prefix `b` and is codec-tagged: raw
+    /// leaves start `bafkrei`, dag-cbor nodes `bafyrei`:
+    ///
+    /// ```
+    /// use sqlitefs::dag::{Cid, DAG_CBOR, RAW};
+    ///
+    /// let raw = Cid::hash(RAW, b"x");
+    /// let cbor = Cid::hash(DAG_CBOR, b"x");
+    /// assert!(raw.to_string_base32().starts_with("bafkrei"));
+    /// assert!(cbor.to_string_base32().starts_with("bafyrei"));
+    /// ```
     #[must_use]
     pub fn to_string_base32(&self) -> String {
         base32_encode(&self.to_bytes())
     }
 
     /// Full CID bytes: `0x01 <codec-varint> 0x12 0x20 <32 hash bytes>`.
+    ///
+    /// # Examples
+    ///
+    /// The wire form is 36 bytes and round-trips through [`Cid::from_raw`]:
+    ///
+    /// ```
+    /// use sqlitefs::dag::{Cid, DAG_CBOR};
+    ///
+    /// let cid = Cid::from_raw(DAG_CBOR, [7u8; 32]);
+    /// let bytes = cid.to_bytes();
+    ///
+    /// assert_eq!(bytes.len(), 36);
+    /// // version varint, dag-cbor codec varint, sha2-256 code + length
+    /// assert_eq!(&bytes[..4], &[0x01, 0x71, 0x12, 0x20]);
+    /// assert_eq!(&bytes[4..], &[7u8; 32]);
+    ///
+    /// let back = Cid::from_raw(DAG_CBOR, bytes[4..].try_into().unwrap());
+    /// assert_eq!(back, cid);
+    /// ```
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0x01];
@@ -718,6 +751,27 @@ pub struct V1Dag {
 ///
 /// Never in practice: the unwrap below is guarded by the balancing loop's
 /// invariant that the current level is non-empty.
+///
+/// # Examples
+///
+/// A file that fits in one raw block is the leaf itself, so the root CID *is*
+/// the leaf CID. The empty file is the canonical empty raw leaf:
+///
+/// ```
+/// use sqlitefs::dag::{RAW, build_v1_2025_dag};
+///
+/// let dag = build_v1_2025_dag(b"hello world");
+/// assert_eq!(dag.blocks.len(), 1);
+/// assert_eq!(dag.blocks[0].cid.codec(), RAW);
+/// assert_eq!(dag.blocks[0].data, b"hello world");
+/// assert_eq!(dag.blocks[0].file_offset, 0);
+/// assert_eq!(dag.root, dag.blocks[0].cid);
+///
+/// let empty = build_v1_2025_dag(b"");
+/// assert_eq!(empty.blocks.len(), 1);
+/// assert!(empty.blocks[0].data.is_empty());
+/// assert_eq!(empty.root, empty.blocks[0].cid);
+/// ```
 #[must_use]
 pub fn build_v1_2025_dag(data: &[u8]) -> V1Dag {
     if data.is_empty() {
