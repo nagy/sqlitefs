@@ -71,6 +71,16 @@ pub enum Command {
     },
 }
 
+/// Create a fresh repository: schema + empty `main` ref.
+///
+/// # Errors
+///
+/// Returns an error if the DB file cannot be opened or the schema cannot be
+/// written.
+///
+/// # Panics
+///
+/// Panics if the system clock is set before the Unix epoch.
 pub fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(path)?;
 
@@ -167,6 +177,15 @@ pub fn init_repo(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 /// chunk) and checks every CID resolves in the chunks table. Prints each problem
 /// and returns `Err` if any are found. Also the foundation for GC: chunks
 /// reachable from refs are exactly the live set.
+///
+/// # Errors
+///
+/// Returns an error if the DB cannot be opened or queried, or `Err` carrying
+/// the problem list (also printed) when integrity checks fail.
+///
+/// # Panics
+///
+/// Panics if the system clock is set before the Unix epoch.
 pub fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
     let mut errors: Vec<String> = Vec::new();
@@ -234,8 +253,7 @@ pub fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // For each ref, walk the commit chain then the tree.
     let mut stmt = db.prepare("SELECT name, commit_hash FROM refs")?;
     let refs: Vec<(String, Vec<u8>)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .filter_map(Result::ok)
         .collect();
     for (name, commit_hash) in refs {
@@ -281,6 +299,7 @@ pub fn fsck_repo(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Format a CID's bytes as hex for error messages.
+#[must_use]
 pub fn hex_cid(cid: &[u8]) -> String {
     let mut s = String::with_capacity(cid.len() * 2);
     for b in cid {
@@ -296,6 +315,10 @@ pub fn hex_cid(cid: &[u8]) -> String {
 /// isn't reachable from refs; this is safe to run on any repo. Needed when the
 /// view gains columns (e.g. `file_mode`) that old repos lack: `mount` reads the
 /// view, so it must be upgraded before the schema change is used.
+///
+/// # Errors
+///
+/// Returns an error if the DB cannot be opened or the index cannot be rebuilt.
 pub fn rebuild_index(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
 
@@ -390,14 +413,17 @@ fn walk_dir_for_index(
 /// Read all refs as `(name, commit_hash)` sorted by name.
 ///
 /// Testable core of show-ref.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 #[allow(clippy::type_complexity)]
 pub fn list_refs(
     db: &rusqlite::Connection,
 ) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
     let mut stmt = db.prepare("SELECT name, commit_hash FROM refs ORDER BY name")?;
     let refs = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .filter_map(Result::ok)
         .collect();
     Ok(refs)
@@ -407,6 +433,11 @@ pub fn list_refs(
 ///
 /// Git show-ref style. Commit CIDs are printed in standard base32 `CIDv1` form
 /// (`bafyrei…`).
+///
+/// # Errors
+///
+/// Returns an error if the DB cannot be opened or a stored commit hash has the
+/// wrong length.
 pub fn show_ref(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(db_path)?;
     for (name, hash) in list_refs(&db)? {
@@ -660,7 +691,7 @@ fn import(db_path: &PathBuf, src: &str, dst: &str) -> Result<(), Box<dyn std::er
         let v1 = dag::build_v1_2025_dag(&data);
         (mc.to_bytes(), Some(v1.root.to_bytes()))
     };
-    let ino = fs.ino_gen.next();
+    let ino = fs.ino_gen.alloc();
     fs.entries.insert(
         ino,
         Entry::File {
@@ -729,20 +760,19 @@ fn resolve_parent_creating(fs: &mut SqliteFs, path: &str) -> Result<(u64, String
             };
             children.get(comp).copied()
         };
-        cur = match next {
-            Some(ino) => ino,
-            None => {
-                let ino = fs.ino_gen.next();
-                fs.entries.insert(
-                    ino,
-                    Entry::Dir {
-                        children: HashMap::new(),
-                        parent: cur,
-                    },
-                );
-                insert_child(fs, cur, comp, ino)?;
-                ino
-            }
+        cur = if let Some(ino) = next {
+            ino
+        } else {
+            let ino = fs.ino_gen.alloc();
+            fs.entries.insert(
+                ino,
+                Entry::Dir {
+                    children: HashMap::new(),
+                    parent: cur,
+                },
+            );
+            insert_child(fs, cur, comp, ino)?;
+            ino
         };
     }
     if name.is_empty() || name == "." || name == ".." || name == ".sqlitefs" {
@@ -783,7 +813,7 @@ fn insert_child(
 /// Files copy by manifest reference — the clone shares chunks with the
 /// original (content-addressed dedup, same as hard links in ADR-0005).
 fn clone_entry(fs: &mut SqliteFs, ino: u64, parent: u64) -> Result<u64, String> {
-    let new_ino = fs.ino_gen.next();
+    let new_ino = fs.ino_gen.alloc();
     // Snapshot the entry's data first: the recursive dir case needs `&mut`.
     enum Kind {
         Dir(Vec<(String, u64)>),

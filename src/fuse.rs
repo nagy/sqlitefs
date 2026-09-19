@@ -265,7 +265,7 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(libc::EEXIST);
             return;
         }
-        let ino = self.ino_gen.next();
+        let ino = self.ino_gen.alloc();
         children.insert(name_str.to_string(), ino);
         self.entries.insert(
             ino,
@@ -356,7 +356,7 @@ impl fuser::Filesystem for SqliteFs {
                     *children = refs;
                 }
             }
-            let ino = self.ino_gen.next();
+            let ino = self.ino_gen.alloc();
             self.entries.insert(
                 ino,
                 Entry::File {
@@ -393,7 +393,7 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(libc::EEXIST);
             return;
         }
-        let ino = self.ino_gen.next();
+        let ino = self.ino_gen.alloc();
         children.insert(name_str.to_string(), ino);
         // Newly created empty file: store an empty manifest now so it is persisted
         // even if never written to (touch foo survives a commit). Compute it before
@@ -680,7 +680,7 @@ impl fuser::Filesystem for SqliteFs {
             reply.error(libc::EEXIST);
             return;
         }
-        let ino = self.ino_gen.next();
+        let ino = self.ino_gen.alloc();
         children.insert(name_str.to_string(), ino);
         self.entries.insert(
             ino,

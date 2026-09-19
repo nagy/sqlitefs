@@ -32,17 +32,20 @@ pub struct Cid {
 impl Cid {
     /// Construct a CID directly from a codec and raw hash bytes.
     #[allow(dead_code)]
+    #[must_use]
     pub fn from_raw(codec: u64, hash: [u8; 32]) -> Self {
         Self { codec, hash }
     }
 
     /// Hash `data` with sha2-256 and construct a CID with `codec`.
+    #[must_use]
     pub fn hash(codec: u64, data: &[u8]) -> Self {
         let hash: [u8; 32] = Sha256::digest(data).into();
         Self { codec, hash }
     }
 
     /// Hash `data` as a dag-pb CID.
+    #[must_use]
     pub fn hash_dag_pb(data: &[u8]) -> Self {
         Self::hash(DAG_PB, data)
     }
@@ -63,22 +66,26 @@ impl Cid {
     /// );
     /// ```
     #[allow(dead_code)]
+    #[must_use]
     pub fn hash_raw(data: &[u8]) -> Self {
         Self::hash(RAW, data)
     }
 
     /// Hash `data` as a dag-cbor CID.
+    #[must_use]
     pub fn hash_dag_cbor(data: &[u8]) -> Self {
         Self::hash(DAG_CBOR, data)
     }
 
     /// The CID's codec.
     #[allow(dead_code)]
+    #[must_use]
     pub fn codec(&self) -> u64 {
         self.codec
     }
 
     /// The 32-byte sha2-256 digest.
+    #[must_use]
     pub fn hash_bytes(&self) -> &[u8; 32] {
         &self.hash
     }
@@ -87,11 +94,13 @@ impl Cid {
     ///
     /// `CIDv1` string, base32 (multibase prefix 'b'), no padding. Algorithm
     /// matches RFC 4648.
+    #[must_use]
     pub fn to_string_base32(&self) -> String {
         base32_encode(&self.to_bytes())
     }
 
     /// Full CID bytes: `0x01 <codec-varint> 0x12 0x20 <32 hash bytes>`.
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0x01];
         encode_varint(self.codec, &mut buf);
@@ -148,6 +157,7 @@ fn base32_encode(data: &[u8]) -> String {
 /// let (data, _cid) = empty_dir();
 /// assert!(is_dir_dag(&data));
 /// ```
+#[must_use]
 pub fn empty_dir() -> (Vec<u8>, Cid) {
     let data = encode_pb_node(&[0x08, 0x01], &[]);
     let cid = Cid::hash_dag_pb(&data);
@@ -170,6 +180,7 @@ pub fn empty_dir() -> (Vec<u8>, Cid) {
 /// assert_eq!(links, vec![("a.txt".to_string(), empty_cid.to_bytes())]);
 /// ```
 #[allow(dead_code)]
+#[must_use]
 pub fn dir_with_links(links: &[(&str, &[u8])]) -> (Vec<u8>, Cid) {
     let link_data: Vec<PbLink> = links
         .iter()
@@ -272,6 +283,7 @@ fn encode_pb_wire_type(_wire: u8, tag: u64, buf: &mut Vec<u8>) {
 /// let (data, _cid) = encode_commit(Some(&root_cid.to_bytes()), &[0xbb; 36], 2);
 /// assert_eq!(data[0], 0xa3); // CBOR map with 3 items
 /// ```
+#[must_use]
 pub fn encode_commit(parent_cid: Option<&[u8]>, tree_cid: &[u8], timestamp: u64) -> (Vec<u8>, Cid) {
     let mut buf = Vec::new();
     // CBOR map with 3 items
@@ -378,6 +390,7 @@ fn cbor_bytes(data: &[u8], buf: &mut Vec<u8>) {
 /// assert_eq!(mode, Some(0o755));
 /// assert_eq!(chunks, hashes);
 /// ```
+#[must_use]
 pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]], size: u64, mode: u32) -> (Vec<u8>, Cid) {
     let mut buf = Vec::new();
     let n = chunk_hashes.len() + 2; // +2 for the size and mode elements
@@ -419,6 +432,7 @@ pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]], size: u64, mode: u32) -> 
 /// let (data, _cid) = encode_symlink("/etc/hosts");
 /// assert_eq!(decode_symlink(&data).as_deref(), Some("/etc/hosts"));
 /// ```
+#[must_use]
 pub fn encode_symlink(target: &str) -> (Vec<u8>, Cid) {
     let mut unixfs = vec![0x08, 0x04];
     unixfs.extend_from_slice(target.as_bytes());
@@ -440,6 +454,7 @@ pub fn encode_symlink(target: &str) -> (Vec<u8>, Cid) {
 /// assert!(decode_symlink(&data).is_some());
 /// assert!(decode_symlink(b"not a dag-pb node").is_none());
 /// ```
+#[must_use]
 pub fn decode_symlink(data: &[u8]) -> Option<String> {
     // dag-pb: field 1 (Data) = 0x0a <len> <unixfs_type: 0x08, 0x04> <target...>
     if data.len() < 5 || data[0] != 0x0a {
@@ -454,6 +469,7 @@ pub fn decode_symlink(data: &[u8]) -> Option<String> {
 }
 
 /// Return true if a chunk blob is a dag-pb directory node.
+#[must_use]
 pub fn is_dir_dag(data: &[u8]) -> bool {
     // dag-pb: field 1 (Data) = 0x0a <len> <unixfs_type: 0x08, 0x01>
     data.len() >= 4 && data[0] == 0x0a && data[1] >= 2 && data[2] == 0x08 && data[3] == 0x01
@@ -477,6 +493,7 @@ pub fn is_dir_dag(data: &[u8]) -> bool {
 /// assert_eq!(links[0].0, "sub");
 /// assert!(decode_dir_links(b"garbage").is_none());
 /// ```
+#[must_use]
 pub fn decode_dir_links(data: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
     let mut pos = 0usize;
     let mut links = Vec::new();
@@ -548,6 +565,7 @@ fn decode_uvarint(data: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// Return true if a chunk blob is a file manifest (dag-cbor array).
+#[must_use]
 pub fn is_file_manifest(data: &[u8]) -> bool {
     !data.is_empty() && data[0] >= 0x80 && data[0] <= 0x9f
 }
@@ -575,6 +593,7 @@ pub type FileManifest = (Option<u64>, Vec<[u8; 32]>, Option<u32>);
 /// assert_eq!(mode, Some(0o644));
 /// assert!(decode_file_manifest(b"not cbor").is_none());
 /// ```
+#[must_use]
 pub fn decode_file_manifest(data: &[u8]) -> Option<FileManifest> {
     if data.is_empty() {
         return None;
@@ -662,6 +681,7 @@ pub fn decode_file_manifest(data: &[u8]) -> Option<FileManifest> {
 ///         .to_string_base32()
 /// );
 /// ```
+#[must_use]
 pub fn reencode_manifest_with_mode(old_data: &[u8], new_mode: u32) -> Option<(Vec<u8>, Cid)> {
     let (size, hashes, _) = decode_file_manifest(old_data)?;
     let size = size?; // old all-hash format can't re-encode (size unknown)
@@ -693,6 +713,12 @@ pub struct V1Dag {
 /// Build a v1-2025 `UnixFS` DAG for a file's worth of bytes.
 ///
 /// The physical CDC chunks must already be concatenated into `data`.
+///
+/// # Panics
+///
+/// Never in practice: the unwrap below is guarded by the balancing loop's
+/// invariant that the current level is non-empty.
+#[must_use]
 pub fn build_v1_2025_dag(data: &[u8]) -> V1Dag {
     if data.is_empty() {
         let r = Cid::hash_raw(b"");

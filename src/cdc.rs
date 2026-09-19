@@ -1,4 +1,4 @@
-//! Content-defined chunking via FastCDC.
+//! Content-defined chunking via `FastCDC`.
 use sha2::{Digest, Sha256};
 
 /// Split data into content-defined chunks.
@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 /// assert_eq!(chunks.len(), 1);
 /// assert_eq!(chunks[0].1, b"hello world");
 /// ```
+#[must_use]
 pub fn chunk_file(data: &[u8]) -> Vec<([u8; 32], Vec<u8>)> {
     let mut chunks = Vec::new();
     // Minimum 64 KiB, average 256 KiB, maximum 1 MiB.

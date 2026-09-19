@@ -1,4 +1,4 @@
-//! sqlitefs — a versioned, content-addressed filesystem in a single SQLite file.
+//! sqlitefs — a versioned, content-addressed filesystem in a single `SQLite` file.
 //!
 //! Library crate: the entry tree, DAG building/committing, chunk store, and
 //! CLI helpers. The FUSE frontend lives in the binary (`src/main.rs`); the
@@ -14,7 +14,7 @@ pub mod fs;
 pub mod fuse;
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, ffi::OsStr, path::PathBuf};
+    use std::{collections::HashMap, path::PathBuf};
 
     use crate::{
         cdc,
@@ -105,7 +105,7 @@ mod tests {
         let mc = store_file_manifest(&fs.db, &chunk_hashes, data.len() as u64, 0o644);
 
         // Insert a File entry into the writable root.
-        let ino = fs.ino_gen.next();
+        let ino = fs.ino_gen.alloc();
         fs.entries.insert(
             ino,
             Entry::File {
@@ -156,7 +156,7 @@ mod tests {
         let chunks = cdc::chunk_file(&data);
         let mc = fs.store_released_file(&data, &chunks, 0o755).unwrap();
 
-        let ino = fs.ino_gen.next();
+        let ino = fs.ino_gen.alloc();
         fs.entries.insert(
             ino,
             Entry::File {
@@ -287,7 +287,7 @@ mod tests {
         let data = b"echo hi\n".to_vec();
         let chunks = cdc::chunk_file(&data);
         let mc = fs.store_released_file(&data, &chunks, 0o755).unwrap();
-        let ino = fs.ino_gen.next();
+        let ino = fs.ino_gen.alloc();
         fs.entries.insert(
             ino,
             Entry::File {
@@ -352,7 +352,7 @@ mod tests {
         init_repo(&path).unwrap();
         let mut fs = SqliteFs::open(&path).unwrap();
 
-        let dir_ino = fs.ino_gen.next();
+        let dir_ino = fs.ino_gen.alloc();
         fs.entries.insert(
             dir_ino,
             Entry::Dir {
@@ -360,7 +360,7 @@ mod tests {
                 parent: ROOT_INODE,
             },
         );
-        let file_ino = fs.ino_gen.next();
+        let file_ino = fs.ino_gen.alloc();
         let manifest_cid = store_empty_manifest(&fs.db);
         fs.entries.insert(
             file_ino,
@@ -371,9 +371,8 @@ mod tests {
                 v1_2025_cid: None,
             },
         );
-        let mut root = match fs.entries.get_mut(&ROOT_INODE) {
-            Some(Entry::Dir { children, .. }) => children,
-            _ => panic!("root should be a Dir"),
+        let Some(Entry::Dir { children: root, .. }) = fs.entries.get_mut(&ROOT_INODE) else {
+            panic!("root should be a Dir")
         };
         root.insert("dir".to_string(), dir_ino);
         root.insert("orig".to_string(), file_ino);
@@ -383,9 +382,8 @@ mod tests {
             .link_entry(file_ino, dir_ino, std::ffi::OsStr::new("link"))
             .unwrap();
         assert_eq!((size, mode), (0, 0o644));
-        let dir = match fs.entries.get(&dir_ino) {
-            Some(Entry::Dir { children, .. }) => children,
-            _ => panic!("dir should be a Dir"),
+        let Some(Entry::Dir { children: dir, .. }) = fs.entries.get(&dir_ino) else {
+            panic!("dir should be a Dir")
         };
         assert_eq!(dir.get("link"), Some(&file_ino));
 
@@ -453,7 +451,7 @@ mod tests {
         init_repo(&path).unwrap();
         let mut fs = SqliteFs::open(&path).unwrap();
 
-        let dir_ino = fs.ino_gen.next();
+        let dir_ino = fs.ino_gen.alloc();
         fs.entries.insert(
             dir_ino,
             Entry::Dir {
@@ -469,7 +467,7 @@ mod tests {
         );
 
         // Symlink target -> EPERM.
-        let sym_ino = fs.ino_gen.next();
+        let sym_ino = fs.ino_gen.alloc();
         fs.entries.insert(
             sym_ino,
             Entry::Symlink {
@@ -497,7 +495,7 @@ mod tests {
         init_repo(&path).unwrap();
         let mut fs = SqliteFs::open(&path).unwrap();
 
-        let file_ino = fs.ino_gen.next();
+        let file_ino = fs.ino_gen.alloc();
         let manifest_cid = store_empty_manifest(&fs.db);
         fs.entries.insert(
             file_ino,
@@ -508,9 +506,8 @@ mod tests {
                 v1_2025_cid: None,
             },
         );
-        let mut root = match fs.entries.get_mut(&ROOT_INODE) {
-            Some(Entry::Dir { children, .. }) => children,
-            _ => panic!("root should be a Dir"),
+        let Some(Entry::Dir { children: root, .. }) = fs.entries.get_mut(&ROOT_INODE) else {
+            panic!("root should be a Dir")
         };
         root.insert("orig".to_string(), file_ino);
 
@@ -569,7 +566,7 @@ mod cli_ro_tests {
         let data = b"hello emacs\n".to_vec();
         let chunks = cdc::chunk_file(&data);
         let mc = fs.store_released_file(&data, &chunks, 0o644).unwrap();
-        let f_ino = fs.ino_gen.next();
+        let f_ino = fs.ino_gen.alloc();
         fs.entries.insert(
             f_ino,
             Entry::File {
@@ -587,7 +584,7 @@ mod cli_ro_tests {
         let script = b"#!/bin/sh\necho hi\n".to_vec();
         let chunks = cdc::chunk_file(&script);
         let mc = fs.store_released_file(&script, &chunks, 0o755).unwrap();
-        let s_ino = fs.ino_gen.next();
+        let s_ino = fs.ino_gen.alloc();
         fs.entries.insert(
             s_ino,
             Entry::File {
@@ -597,7 +594,7 @@ mod cli_ro_tests {
                 v1_2025_cid: None,
             },
         );
-        let sub_ino = fs.ino_gen.next();
+        let sub_ino = fs.ino_gen.alloc();
         fs.entries.insert(
             sub_ino,
             Entry::Dir {
@@ -610,7 +607,7 @@ mod cli_ro_tests {
         }
 
         // link.txt -> hello.txt (commit_as_ref stores the symlink manifest)
-        let sym_ino = fs.ino_gen.next();
+        let sym_ino = fs.ino_gen.alloc();
         fs.entries.insert(
             sym_ino,
             Entry::Symlink {
@@ -703,9 +700,10 @@ mod cli_ro_tests {
         let path = temp_db_path("read_file.db");
         build_repo(&path);
         let db = rusqlite::Connection::open(&path).unwrap();
-        let manifest = match crate::cli::resolve_ref_ro(&db, "main", "hello.txt").unwrap() {
-            Node::File { manifest, .. } => manifest,
-            _ => panic!("expected file"),
+        let Node::File { manifest, .. } =
+            crate::cli::resolve_ref_ro(&db, "main", "hello.txt").unwrap()
+        else {
+            panic!("expected file")
         };
         let content = crate::cli::read_file(&db, &manifest).unwrap();
         assert_eq!(content, b"hello emacs\n");

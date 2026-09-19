@@ -28,8 +28,9 @@ impl InoGen {
     fn new(start: u64) -> Self {
         Self { next: start }
     }
-    /// Allocate the next inode.
-    pub fn next(&mut self) -> u64 {
+    /// Allocate the next inode number.
+    #[must_use]
+    pub fn alloc(&mut self) -> u64 {
         let n = self.next;
         self.next += 1;
         n
@@ -103,6 +104,11 @@ pub struct SqliteFs {
 
 impl SqliteFs {
     /// Open (or create) a repo and load the working tree from the `main` ref.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the DB cannot be opened or the snapshot tree cannot
+    /// be loaded.
     pub fn open(db_path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let db = rusqlite::Connection::open(db_path)?;
         // WAL + relaxed sync: faster writes, better crash consistency for an
@@ -151,7 +157,7 @@ impl SqliteFs {
                         ROOT_INODE,
                     ),
                     entry => {
-                        let child_ino = ino_gen.next();
+                        let child_ino = ino_gen.alloc();
                         entries.insert(child_ino, entry);
                         child_ino
                     }
@@ -215,6 +221,10 @@ impl SqliteFs {
     }
 
     /// Walk DB `refs/commits/directory_index` and build the snapshot tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the DB queries fail.
     pub fn load_snapshot_tree(
         db: &rusqlite::Connection,
         ino_gen: &mut InoGen,
@@ -249,7 +259,7 @@ impl SqliteFs {
         parent_cid: &[u8],
         parent_inode: u64,
     ) -> u64 {
-        let ino = ino_gen.next();
+        let ino = ino_gen.alloc();
         let mut children = HashMap::new();
 
         let mut cs = db
@@ -271,7 +281,7 @@ impl SqliteFs {
                         Self::load_dir_recursive(db, ino_gen, entries, &child_cid, ino)
                     }
                     entry => {
-                        let child_ino = ino_gen.next();
+                        let child_ino = ino_gen.alloc();
                         entries.insert(child_ino, entry);
                         child_ino
                     }
@@ -396,11 +406,23 @@ impl SqliteFs {
     }
 
     /// Commit the dirty tree to the 'main' ref.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from `commit_as_ref`.
     pub fn commit_dirty_tree(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.commit_as_ref("main")
     }
 
     /// Create a named commit (ref) from the current dirty tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction or any of the DAG/DB writes fail.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system clock is set before the Unix epoch.
     pub fn commit_as_ref(&mut self, ref_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Everything from the DAG build to the ref update happens in ONE transaction:
         // a crash mid-commit can no longer leave orphan chunks/commits or a ref
@@ -468,6 +490,11 @@ impl SqliteFs {
     /// Everything happens in ONE transaction, so a crash mid-write rolls back and no
     /// partial file survives. Returns the manifest CID. `mode` is persisted into the
     /// manifest so a chmod survives commit/remount.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction or any of the chunk/manifest/block
+    /// writes fail.
     pub fn store_released_file(
         &self,
         data: &[u8],
