@@ -201,6 +201,25 @@
             };
           };
 
+          # Static rustdoc HTML (what `cargo doc` writes to ./target/doc/)
+          # installed under $out/share/doc. Reuses the same cargoArtifacts,
+          # so only doc crates compile; --no-deps (crane's default) keeps
+          # third-party crates out of the search index. Browse offline:
+          # nix run nixpkgs#python3 -- -m http.server -d <doc-out>/share/doc
+          docs = craneLib.cargoDoc {
+            inherit cargoArtifacts;
+            inherit (commonArgs) src nativeBuildInputs buildInputs;
+            meta.description = "sqlitefs API documentation";
+          };
+
+          # Doctests: code blocks in doc comments compiled and run against
+          # the library (`cargo test --doc`), same artifact set as above.
+          doctests = craneLib.cargoDocTest {
+            inherit cargoArtifacts;
+            inherit (commonArgs) src nativeBuildInputs buildInputs;
+            meta.description = "sqlitefs doctests";
+          };
+
           # The VM test needs a debug build of the *installed* binary.
           vmTest = import ./test/default.nix {
             inherit pkgs lib;
@@ -211,10 +230,12 @@
           packages.sqlitefs = sqlitefs;
           packages.sqlitefs-emacs = sqlitefs-emacs;
           packages.emacs-sqlitefs = emacs-sqlitefs;
+          packages.sqlitefs-doc = docs;
           packages.default = config.packages.sqlitefs;
 
           checks.sqlitefs = vmTest;
           checks.emacs-sqlitefs = emacs-sqlitefs;
+          checks.doctests = doctests;
 
           checks.default = craneLib.cargoTest (
             commonArgs

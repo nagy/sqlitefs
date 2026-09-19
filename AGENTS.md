@@ -52,6 +52,9 @@ Summary:
 
 - **Build**: `nix build .#sqlitefs` (also `nix flake check`, `nix develop`).
   Dev-shell tools come from `devShells.default`; the VM test runs via `nix flake check`.
+- **Docs**: `nix build .#sqlitefs-doc` — static rustdoc HTML (offline browse: serve
+  `share/doc/` with `python3 -m http.server`). Doctests run as `checks.doctests`
+  (`nix flake check` covers them).
 - **Formatting** via **treefmt-nix** (`nix fmt`) — `rustfmt`, `taplo` (TOML), `nixfmt` (Nix).
   Rustfmt config is passed as CLI args in `flake.nix` (`settings.formatter.rustfmt.options`)
   (`max_width = 100`, `format_strings = true`, `imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`, etc.).
@@ -92,7 +95,8 @@ keeps its own in-memory tree — it will not see CLI changes until remounted.
 ## Emacs module (read-only, no FUSE)
 
 Feature `emacs` on the crate compiles the cdylib into an Emacs dynamic module:
-`nix develop -c cargo build --features emacs` → `target/debug/libsqlitefs.so`.
+`cargo build --features emacs` → `target/debug/libsqlitefs.so` (dev shell; for
+packaged builds use `.#emacs-sqlitefs` below).
 Module functions (all stateless; each opens the DB with SQLITE_OPEN_READ_ONLY
 and resolves the committed tree — safe next to a live FUSE mount; defun args
 are all required, nil selects the documented default — the elisp frontend
@@ -115,8 +119,8 @@ Flake packages: `.#sqlitefs-emacs` (module cdylib) and `.#emacs-sqlitefs`
 (elisp + bytecode + autoloads + `.so` in one site-lisp tree; byte-compiles
 with warnings-as-errors and runs the ERT suite as an install check — wired
 into `checks`, so `nix flake check` covers the Emacs integration).
-Tests: `nix develop -c emacs -Q --batch -l test/emacs-module-tests.el`
-(needs the module built with the feature first); Rust-side coverage in
+Tests: `emacs -Q --batch -l test/emacs-module-tests.el` (dev shell; needs the
+module built with the feature first); Rust-side coverage in
 `cli_ro_tests` (`resolve_ref_ro`, `read_file`).
 
 ## Snapshot model
