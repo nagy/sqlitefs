@@ -48,6 +48,20 @@ impl Cid {
     }
 
     /// Hash `data` as a raw CID.
+    ///
+    /// # Examples
+    ///
+    /// The empty raw-leaf CID matches the canonical IPFS value:
+    ///
+    /// ```
+    /// use sqlitefs::dag::Cid;
+    ///
+    /// let cid = Cid::hash_raw(b"");
+    /// assert_eq!(
+    ///     cid.to_string_base32(),
+    ///     "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
+    /// );
+    /// ```
     #[allow(dead_code)]
     pub fn hash_raw(data: &[u8]) -> Self {
         Self::hash(RAW, data)
@@ -125,6 +139,15 @@ fn base32_encode(data: &[u8]) -> String {
 ///
 /// Returns (`encoded_dag_pb_bytes`, CID). `PBNode` { Data: [0x08, 0x01]
 /// (`UnixFS` Type=Directory), Links: [] }
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::dag::{empty_dir, is_dir_dag};
+///
+/// let (data, _cid) = empty_dir();
+/// assert!(is_dir_dag(&data));
+/// ```
 pub fn empty_dir() -> (Vec<u8>, Cid) {
     let data = encode_pb_node(&[0x08, 0x01], &[]);
     let cid = Cid::hash_dag_pb(&data);
@@ -134,6 +157,18 @@ pub fn empty_dir() -> (Vec<u8>, Cid) {
 /// Build a `UnixFS` directory dag-pb node with children.
 ///
 /// Each link: (name, `cid_bytes`, tsize=0).
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::dag::{decode_dir_links, dir_with_links, empty_dir};
+///
+/// let (_empty, empty_cid) = empty_dir();
+/// let (data, _cid) = dir_with_links(&[("a.txt", &empty_cid.to_bytes())]);
+///
+/// let links = decode_dir_links(&data).unwrap();
+/// assert_eq!(links, vec![("a.txt".to_string(), empty_cid.to_bytes())]);
+/// ```
 #[allow(dead_code)]
 pub fn dir_with_links(links: &[(&str, &[u8])]) -> (Vec<u8>, Cid) {
     let link_data: Vec<PbLink> = links
@@ -224,6 +259,19 @@ fn encode_pb_wire_type(_wire: u8, tag: u64, buf: &mut Vec<u8>) {
 /// by (length, byte-order) — tree (4), parent (6), timestamp (9) — and CIDs as
 /// tag-42 byte strings (RFC 7049 §3.9, IPLD dag-cbor spec). Bare bytes would
 /// parse but produce a non-canonical CID.
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::dag::encode_commit;
+///
+/// // Root commit: no parent, encodes as a 2-entry CBOR map.
+/// let (_data0, root_cid) = encode_commit(None, &[0xaa; 36], 1);
+///
+/// // Child commit: parent + tree + timestamp, 3-entry map.
+/// let (data, _cid) = encode_commit(Some(&root_cid.to_bytes()), &[0xbb; 36], 2);
+/// assert_eq!(data[0], 0xa3); // CBOR map with 3 items
+/// ```
 pub fn encode_commit(parent_cid: Option<&[u8]>, tree_cid: &[u8], timestamp: u64) -> (Vec<u8>, Cid) {
     let mut buf = Vec::new();
     // CBOR map with 3 items
@@ -316,6 +364,20 @@ fn cbor_bytes(data: &[u8], buf: &mut Vec<u8>) {
 /// stay canonical). Chunk hashes are 32-byte byte strings. Embedding size+mode
 /// means `stat()` never has to fetch chunk data, and a chmod changes the
 /// manifest CID (so it's part of the content-addressed tree).
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::dag::{decode_file_manifest, encode_file_manifest};
+///
+/// let hashes: Vec<[u8; 32]> = (0..3u8).map(|i| [i; 32]).collect();
+/// let (data, _cid) = encode_file_manifest(&hashes, 42, 0o755);
+///
+/// let (size, chunks, mode) = decode_file_manifest(&data).unwrap();
+/// assert_eq!(size, Some(42));
+/// assert_eq!(mode, Some(0o755));
+/// assert_eq!(chunks, hashes);
+/// ```
 pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]], size: u64, mode: u32) -> (Vec<u8>, Cid) {
     let mut buf = Vec::new();
     let n = chunk_hashes.len() + 2; // +2 for the size and mode elements
@@ -348,6 +410,15 @@ pub fn encode_file_manifest(chunk_hashes: &[[u8; 32]], size: u64, mode: u32) -> 
 /// Encode a symlink as a dag-pb node.
 ///
 /// Data = `[0x08, 0x04]` + target bytes, no links. `CIDv1` dag-pb.
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::dag::{decode_symlink, encode_symlink};
+///
+/// let (data, _cid) = encode_symlink("/etc/hosts");
+/// assert_eq!(decode_symlink(&data).as_deref(), Some("/etc/hosts"));
+/// ```
 pub fn encode_symlink(target: &str) -> (Vec<u8>, Cid) {
     let mut unixfs = vec![0x08, 0x04];
     unixfs.extend_from_slice(target.as_bytes());
@@ -359,6 +430,16 @@ pub fn encode_symlink(target: &str) -> (Vec<u8>, Cid) {
 /// Decode a symlink dag-pb node, returning the target path.
 ///
 /// Returns None if the node is not a symlink.
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::dag::{decode_symlink, encode_symlink};
+///
+/// let (data, _cid) = encode_symlink("a -> b");
+/// assert!(decode_symlink(&data).is_some());
+/// assert!(decode_symlink(b"not a dag-pb node").is_none());
+/// ```
 pub fn decode_symlink(data: &[u8]) -> Option<String> {
     // dag-pb: field 1 (Data) = 0x0a <len> <unixfs_type: 0x08, 0x04> <target...>
     if data.len() < 5 || data[0] != 0x0a {
@@ -383,6 +464,19 @@ pub fn is_dir_dag(data: &[u8]) -> bool {
 /// Returns None on parse failure. Matches the format produced by
 /// `dir_with_links`: repeated field 2 (0x12) messages, each containing hash
 /// (field 1), name (field 2), tsize (field 3).
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::dag::{decode_dir_links, dir_with_links, empty_dir};
+///
+/// let (_empty, empty_cid) = empty_dir();
+/// let (data, _cid) = dir_with_links(&[("sub", &empty_cid.to_bytes())]);
+///
+/// let links = decode_dir_links(&data).unwrap();
+/// assert_eq!(links[0].0, "sub");
+/// assert!(decode_dir_links(b"garbage").is_none());
+/// ```
 pub fn decode_dir_links(data: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
     let mut pos = 0usize;
     let mut links = Vec::new();
@@ -467,6 +561,20 @@ pub type FileManifest = (Option<u64>, Vec<[u8; 32]>, Option<u32>);
 /// Parse a file manifest CBOR array.
 ///
 /// See `FileManifest` for the shape. Returns None on parse failure.
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::dag::{decode_file_manifest, encode_file_manifest};
+///
+/// let (data, _cid) = encode_file_manifest(&[[7u8; 32]], 7, 0o644);
+/// let (size, hashes, mode) = decode_file_manifest(&data).unwrap();
+///
+/// assert_eq!(size, Some(7));
+/// assert_eq!(hashes, vec![[7u8; 32]]);
+/// assert_eq!(mode, Some(0o644));
+/// assert!(decode_file_manifest(b"not cbor").is_none());
+/// ```
 pub fn decode_file_manifest(data: &[u8]) -> Option<FileManifest> {
     if data.is_empty() {
         return None;
@@ -537,6 +645,23 @@ pub fn decode_file_manifest(data: &[u8]) -> Option<FileManifest> {
 /// so changing it must produce a new manifest chunk (and thus a new CID the tree
 /// links). Falls back to encoding from (size, hashes) when the old format is
 /// all-hash (size unknown).
+///
+/// # Examples
+///
+/// ```
+/// use sqlitefs::dag::{decode_file_manifest, encode_file_manifest, reencode_manifest_with_mode};
+///
+/// let (old_data, _old_cid) = encode_file_manifest(&[[1u8; 32]], 1, 0o644);
+/// let (new_data, new_cid) = reencode_manifest_with_mode(&old_data, 0o600).unwrap();
+///
+/// assert_eq!(decode_file_manifest(&new_data).unwrap().2, Some(0o600));
+/// assert_ne!(
+///     new_cid.to_string_base32(),
+///     encode_file_manifest(&[[1u8; 32]], 1, 0o644)
+///         .1
+///         .to_string_base32()
+/// );
+/// ```
 pub fn reencode_manifest_with_mode(old_data: &[u8], new_mode: u32) -> Option<(Vec<u8>, Cid)> {
     let (size, hashes, _) = decode_file_manifest(old_data)?;
     let size = size?; // old all-hash format can't re-encode (size unknown)

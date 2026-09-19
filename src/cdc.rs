@@ -5,6 +5,18 @@ use sha2::{Digest, Sha256};
 ///
 /// Returns `(sha256_hash, chunk_bytes)` pairs. Uses `FastCDC` v2020 with expected
 /// 256 KiB average chunk size.
+///
+/// # Examples
+///
+/// Data smaller than the 64 KiB minimum comes back as one chunk:
+///
+/// ```
+/// use sqlitefs::cdc::chunk_file;
+///
+/// let chunks = chunk_file(b"hello world");
+/// assert_eq!(chunks.len(), 1);
+/// assert_eq!(chunks[0].1, b"hello world");
+/// ```
 pub fn chunk_file(data: &[u8]) -> Vec<([u8; 32], Vec<u8>)> {
     let mut chunks = Vec::new();
     // Minimum 64 KiB, average 256 KiB, maximum 1 MiB.
