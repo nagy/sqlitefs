@@ -186,6 +186,7 @@ GFile in repo: ")
 
 (define-derived-mode sqlitefs-dired-mode special-mode "sqlitefs-dired"
   "Read-only Dired-like browsing of a sqlitefs repository."
+  :interactive nil
   (setq-local revert-buffer-function (lambda (&rest _) (sqlitefs--refresh))))
 
 ;;;###autoload
