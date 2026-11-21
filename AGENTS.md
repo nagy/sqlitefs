@@ -27,15 +27,13 @@ Emacs dynamic module.
 
 ## Build and test
 
-- `nix flake check` — build, clippy, tests, doctests, treefmt, the VM test and the
-  Emacs integration check. Gate for a commit.
+- `nix flake check` — the gate. Run before a commit.
 - `nix build .#sqlitefs` — the package.
 - `nix build .#sqlitefs-doc` — static rustdoc HTML. Serve `share/doc/` with
   `python3 -m http.server` for an offline read. Doctests run as `checks.doctests`.
 - `nix build .#sqlitefs-emacs` — the Emacs module cdylib.
 - `nix build .#emacs-sqlitefs` — elisp, bytecode, autoloads and the `.so` in one
-  site-lisp tree. It byte-compiles with warnings as errors and runs the ERT suite
-  as an install check.
+  site-lisp tree.
 - `nix fmt` — treefmt drives rustfmt, taplo and nixfmt. The rustfmt options are
   CLI args in `flake.nix` (`max_width = 100`, `format_strings = true`,
   `imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`).
