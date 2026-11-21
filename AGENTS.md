@@ -134,7 +134,6 @@ checkout.
   FUSE offsets carry their allow there.
 - Keep the module read-only. A write path through the module breaks the safety
   argument next to a live mount.
-- Keep `Cargo.lock` committed. The Nix build has no network.
 
 ## Conventions
 
