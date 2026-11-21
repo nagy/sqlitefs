@@ -1,149 +1,168 @@
-# sqlitefs
+# AGENTS.md — sqlitefs
 
-A versioned, content-addressed filesystem where a single SQLite file is both the repository and the mountable volume.
-Built in Rust.
+## Purpose
 
-## Project structure
+`sqlitefs`: versioned, content-addressed filesystem where one SQLite file serves
+as both the repository and the mountable volume. Rust edition 2024. License:
+AGPL-3.0. Ships the `sqlitefs` binary, a library crate, a FUSE mount, a CLI and an
+Emacs dynamic module.
 
-```
-.
-├── README.org           # features, usage, development
-├── CONTEXT.md           # ubiquitous language / glossary
-├── AGENTS.md            # this file
-├── Cargo.toml
-├── Cargo.lock
-├── flake.nix            # Nix flake: packages, devShells, checks (crane; incl. emacs-sqlitefs)
-├── flake.lock
-├── test/
-│   ├── default.nix      # NixOS VM test (nixos-lib.runTest, wired via checks.sqlitefs)
-│   └── emacs-module-tests.el # ERT tests for the Emacs module (module-load + repo fixture)
-├── .gitignore
-├── LICENSE              # AGPL-3.0
-├── src/
-│   ├── lib.rs           # library crate: modules + unit tests (core shared by bin and Emacs module)
-│   ├── main.rs          # entry: CLI parse + mount dispatch (flock, fuser::mount2)
-│   ├── fuse.rs          # FUSE trait impl (writable root + .sqlitefs/ snapshots + tag + rename + symlinks + hard links)
-│   ├── emacs_module.rs  # Emacs dynamic module (feature `emacs`): read-only refs/ls/read/log/catalog
-│   ├── fs.rs            # stateful core: Entry tree, SqliteFs, DAG build/commit, chunk store
-│   ├── cli.rs           # CLI (init, mount, fsck, rebuild-index, show-ref, ls, cat, cp, mv) + repo-level ops
-│   ├── dag.rs           # CIDv1, dag-pb, dag-cbor, v1-2025 UnixFS DAG builder
-│   └── cdc.rs           # content-defined chunking (FastCDC v2020 + SHA-256)
-├── emacs/
-│   └── sqlitefs.el      # Elisp frontend: dired-like repo browser + read-only visit buffers
-└── docs/
-    └── adr/             # Architectural Decision Records (0001–0005)
-```
+## Layout
 
-## Key architectural decisions
+| Path | Ownership |
+|---|---|
+| `src/lib.rs` | Library crate: modules plus unit tests, shared by the binary and the Emacs module. |
+| `src/main.rs` | Entry point: CLI parse and mount dispatch (`flock`, `fuser::mount`). |
+| `src/fs.rs` | Stateful core: the `Entry` tree, `SqliteFs`, DAG build and commit, the chunk store. |
+| `src/fuse.rs` | FUSE trait impl: writable root, `.sqlitefs/` snapshots, tags, rename, symlinks, hard links. |
+| `src/emacs_module.rs` | Emacs dynamic module behind the `emacs` feature: read-only refs, ls, read, log, catalog. |
+| `src/cli.rs` | CLI: `init`, `mount`, `fsck`, `rebuild-index`, `show-ref`, `ls`, `cat`, `cp`, `mv`, plus repo-level operations. |
+| `src/dag.rs` | CIDv1, dag-pb, dag-cbor, the v1-2025 UnixFS DAG builder. |
+| `src/cdc.rs` | Content-defined chunking: FastCDC v2020 plus SHA-256. |
+| `emacs/sqlitefs.el` | Elisp frontend: dired-like repo browser and read-only visit buffers. |
+| `test/default.nix` | NixOS VM test through `nixos-lib.runTest`, wired as `checks.sqlitefs`. |
+| `test/emacs-module-tests.el` | ERT tests for the Emacs module. |
+| `docs/adr/` | Decision records 0001 to 0005. |
+| `CONTEXT.md` | Domain glossary. |
 
-See `docs/adr/` for the full record.
-Summary:
+## Build and test
 
-1. **SQLite is the canonical store** — the `.db` file IS the repository.
-   `directory_index` and `block_index` are materialized views rebuildable from the chunk store.
-2. **Dual chunking** — FastCDC for physical dedup, UnixFS v1-2025 for public IPFS CIDs.
-   Mapped via `block_index`.
-3. **IPFS-native DAG** — dag-pb directories, v1-2025 file layout, dag-cbor commits.
-   Content-addressed with CIDv1 + SHA-256.
-4. **Live writable FUSE** — writes in memory, hashed on `close()`, committed periodically and manually.
-   Hidden `.sqlitefs/` directory for snapshot browsing.
+- `nix flake check` — build, clippy, tests, doctests, treefmt, the VM test and the
+  Emacs integration check. Gate for a commit.
+- `nix build .#sqlitefs` — the package.
+- `nix build .#sqlitefs-doc` — static rustdoc HTML. Serve `share/doc/` with
+  `python3 -m http.server` for an offline read. Doctests run as `checks.doctests`.
+- `nix build .#sqlitefs-emacs` — the Emacs module cdylib.
+- `nix build .#emacs-sqlitefs` — elisp, bytecode, autoloads and the `.so` in one
+  site-lisp tree. It byte-compiles with warnings as errors and runs the ERT suite
+  as an install check.
+- `nix fmt` — treefmt drives rustfmt, taplo and nixfmt. The rustfmt options are
+  CLI args in `flake.nix` (`max_width = 100`, `format_strings = true`,
+  `imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`).
+- `nix develop` — dev shell.
+- `cargo build --features emacs` — build the module into
+  `target/debug/libsqlitefs.so`.
+- `emacs -Q --batch -l test/emacs-module-tests.el` — ERT suite in the dev shell.
+  It needs the module built with the feature first.
 
-## Tooling
+## Architecture
 
-- **Build**: `nix build .#sqlitefs` (also `nix flake check`). Dev-shell
-  tools come from `devShells.default`; the VM test runs via `nix flake check`.
-- **Docs**: `nix build .#sqlitefs-doc` — static rustdoc HTML (offline browse: serve
-  `share/doc/` with `python3 -m http.server`). Doctests run as `checks.doctests`
-  (`nix flake check` covers them).
-- **Formatting** via **treefmt-nix** (`nix fmt`) — `rustfmt`, `taplo` (TOML), `nixfmt` (Nix).
-  Rustfmt config is passed as CLI args in `flake.nix` (`settings.formatter.rustfmt.options`)
-  (`max_width = 100`, `format_strings = true`, `imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`, etc.).
-- **Clippy**: pedantic by default via `[lints.clippy]` in Cargo.toml.
-  Intentional `as` casts (varint/base32 encoding, FUSE offsets) are allowed there, so `cargo clippy` runs clean.
+### Canonical store
 
-- **Language**: Rust.
-- **Key crates (current)**: `clap` (CLI), `rusqlite` (SQLite), `fuser` (FUSE), `libc` (errnos), `sha2` (SHA-256), `fastcdc` (CDC chunking).
-- **Key crates (planned)**: none pending.
-- **Chunking**: FastCDC (pluggable — may evaluate rapidCDC later).
-- **UnixFS v1-2025**: custom DAG builder (raw leaves, balanced dag-pb tree, per-block offsets).
-  No mature Rust impl — validate against ipfs-chainer reference.
+- The `.db` file is the repository. `directory_index` and `block_index` are
+  materialized views, rebuildable from the chunk store.
+- Dual chunking: FastCDC for physical dedup, UnixFS v1-2025 for public IPFS CIDs,
+  mapped through `block_index`.
+- IPFS-native DAG: dag-pb directories, the v1-2025 file layout, dag-cbor commits,
+  content-addressed with CIDv1 and SHA-256.
+- Live writable FUSE: writes stay in memory, hash on `close()`, and commit
+  periodically and by hand. A hidden `.sqlitefs/` directory serves snapshot
+  browsing.
 
-## FUSE operations implemented
+### FUSE operations
 
-|Operation                                   |Status                                     |
-|--------------------------------------------|-------------------------------------------|
-|`lookup`, `getattr`, `readdir`              |✓                                          |
-|`mkdir`, `rmdir`                            |✓ (auto-commit)                            |
-|`create`, `open`, `write`, `release`, `read`|✓ (CDC + commit on release)                |
-|`unlink`                                    |✓ (auto-commit)                            |
-|`rename`                                    |✓ (cross-directory, overwrite, auto-commit)|
-|`symlink`, `readlink`                       |✓                                          |
-|`link` (hard links for files)               |✓ (files only; new parent must be writable)|
-|`forget`                                    |✓                                          |
-|`getxattr`, `listxattr`                     |Stub (no xattrs)                           |
-|`setattr` (truncate-to-zero, chmod)         |✓ (auto-commit; uid/gid/utimes ignored)    |
-|`flush`, `fsync`                            |Not needed (no-op ok)                      |
+| Operation | Status |
+|---|---|
+| `lookup`, `getattr`, `readdir` | Implemented |
+| `mkdir`, `rmdir` | Implemented, auto-commit |
+| `create`, `open`, `write`, `release`, `read` | Implemented, CDC plus commit on release |
+| `unlink` | Implemented, auto-commit |
+| `rename` | Implemented, cross-directory, overwrite, auto-commit |
+| `symlink`, `readlink` | Implemented |
+| `link` | Implemented for files. The new parent must be writable. |
+| `forget` | Implemented |
+| `getxattr`, `listxattr` | Stub, no xattrs |
+| `setattr` | Implemented for truncate-to-zero and chmod, auto-commit. uid, gid and utimes are ignored. |
+| `flush`, `fsync` | No-op |
 
-## CLI file access (no FUSE)
+### CLI without FUSE
 
-`sqlitefs ls/cat/cp/mv <db> <path>` read the committed `main` tree directly
-(via `refs` → `commits` → `directory_index`); `cp`/`mv` reuse the `SqliteFs`
-entry tree and commit per command. The `.sqlitefs/` namespace is not reachable.
-Caveat: CLI mutations commit to the DB, but a concurrently running FUSE mount
-keeps its own in-memory tree — it will not see CLI changes until remounted.
+`sqlitefs ls|cat|cp|mv <db> <path>` reads the committed `main` tree directly
+through `refs`, `commits` and `directory_index`. `cp` and `mv` reuse the
+`SqliteFs` entry tree and commit per command. The `.sqlitefs/` namespace stays
+unreachable. A CLI mutation commits to the DB, but a concurrent FUSE mount keeps
+its own in-memory tree and sees no CLI change until a remount.
 
-## Emacs module (read-only, no FUSE)
+### Emacs module
 
-Feature `emacs` on the crate compiles the cdylib into an Emacs dynamic module:
-`cargo build --features emacs` → `target/debug/libsqlitefs.so` (dev shell; for
-packaged builds use `.#emacs-sqlitefs` below).
-Module functions (all stateless; each opens the DB with SQLITE_OPEN_READ_ONLY
-and resolves the committed tree — safe next to a live FUSE mount; defun args
-are all required, nil selects the documented default — the elisp frontend
-wraps the defaults):
+The `emacs` feature compiles the cdylib into an Emacs dynamic module. Every
+function stays stateless: it opens the DB with `SQLITE_OPEN_READ_ONLY` and
+resolves the committed tree, so it runs safely next to a live FUSE mount. Every
+defun argument is required, and nil selects the documented default, which the
+Elisp frontend wraps.
 
 - `(sqlitefs-refs PATH)` — alist of `(NAME . COMMIT-CID)`.
 - `(sqlitefs-ls PATH DIR REF)` — list of `(NAME KIND SIZE MODE)`.
-- `(sqlitefs-read PATH FILE REF)` — file content (UTF-8 only).
+- `(sqlitefs-read PATH FILE REF)` — file content, UTF-8 only.
 - `(sqlitefs-log PATH REF)` — `(CID . TIMESTAMP)` history, newest first.
 - `(sqlitefs-catalog)` — the exported-function catalog as `(NAME ARGS DOC)` lists.
-  The catalog (in `emacs_module.rs`) is the single source of truth for the API
-  surface; the ERT parity test pins every entry (`fboundp`, arity, doc first
-  line). Add a catalog entry together with its `#[defun]`.
 
-Elisp frontend `emacs/sqlitefs.el`: `sqlitefs-dired` (dired-like browser),
-`sqlitefs-visit` (read-only file buffer), `sqlitefs-show-refs`. The module
-library is located via `load-path` (the Nix package installs the `.so` next
-to the elisp) with a `target/{debug,release}` fallback for dev checkouts.
-Flake packages: `.#sqlitefs-emacs` (module cdylib) and `.#emacs-sqlitefs`
-(elisp + bytecode + autoloads + `.so` in one site-lisp tree; byte-compiles
-with warnings-as-errors and runs the ERT suite as an install check — wired
-into `checks`, so `nix flake check` covers the Emacs integration).
-Tests: `emacs -Q --batch -l test/emacs-module-tests.el` (dev shell; needs the
-module built with the feature first); Rust-side coverage in
-`cli_ro_tests` (`resolve_ref_ro`, `read_file`).
+The catalog in `emacs_module.rs` is the single source of truth for the API
+surface, and the ERT parity test pins every entry through `fboundp`, arity and
+the doc first line. Add a catalog entry together with its `#[defun]`.
 
-## Snapshot model
+The Elisp frontend `emacs/sqlitefs.el` holds `sqlitefs-dired`, a dired-like
+browser, `sqlitefs-visit`, a read-only file buffer, and `sqlitefs-show-refs`. It
+locates the module library through `load-path`, which the Nix package fills with
+the `.so` beside the elisp, and falls back to `target/{debug,release}` for a dev
+checkout.
 
-- **Auto-commit**: every 60s if dirty, checked on `lookup`/`create`/`open`.
-- **File modes**: mode is embedded in the file manifest (dag-cbor); chmod re-stores the manifest (new CID).
-  `directory_index.file_mode` is a denormalized cache; `sqlitefs rebuild-index` recreates it from refs (run once when upgrading old repos).
-- **Manual named snapshot**: `touch .sqlitefs/tag/<name>` creates a named ref.
-- **Hard links**: `link` creates a second directory entry pointing at the same inode (same manifest CID → dedup).
-  Files only; nlink always reported as 1 — see docs/adr/0005-hard-links.md.
-- **Snapshot browsing**: `.sqlitefs/refs/<name>/` (hidden from readdir).
-- **Hash access** (`.sqlitefs/c/<hash-prefix>/`): ✓ (prefix lookup in commits table, cached).
+### Snapshot model
 
-## Rules for agents
+- Auto-commit every 60s while dirty, checked on `lookup`, `create` and `open`.
+- The file mode lives in the file manifest (dag-cbor), and chmod re-stores the
+  manifest with a new CID. `directory_index.file_mode` is a denormalized cache,
+  and `sqlitefs rebuild-index` recreates it from refs. Run that once when
+  upgrading an old repo.
+- `touch .sqlitefs/tag/<name>` creates a manual named snapshot.
+- `link` creates a second directory entry for one inode, so both names hold one
+  manifest CID and dedup follows. Files only, and nlink always reports 1. See
+  `docs/adr/0005-hard-links.md`.
+- Snapshot browsing lives at `.sqlitefs/refs/<name>/`, hidden from readdir.
+- Hash access at `.sqlitefs/c/<hash-prefix>/` works through a prefix lookup in
+  the commits table, cached.
 
-When working on this repo, agents MUST:
+## Rules
 
-1. **Keep AGENTS.md and CONTEXT.md up to date** — before every commit, verify no updates are needed.
-2. **Use Rust idioms from the user's conventions** — see the `rust-idioms` skill.
-3. **Do not add dependencies lightly** — run through the ponytail filter first.
-   Prefer stdlib, minimal crates.
-4. **Treat `cargo fmt` as mandatory** before every commit.
-5. **Build with `cargo build`** — `cargo fmt && cargo clippy` too.
-6. **Git commits without GPG signing** — use `--no-gpg-sign`.
-7. **Keep the Remaining work list up to date** — add new outstanding work as numbered entries.
-   Remove finished entries entirely (never cross out, never mark done).
+- Keep `AGENTS.md` and `CONTEXT.md` current. Check both before every commit.
+- Add a dependency only after the ponytail filter. Prefer the standard library and
+  a minimal crate.
+- Keep the Open work list current. Add new work as a numbered entry and remove a
+  finished entry entirely. Do not cross it out or mark it done.
+- Keep clippy clean at the pedantic level set by `[lints.clippy]` in
+  `Cargo.toml`. The intentional `as` casts for varint and base32 encoding and for
+  FUSE offsets carry their allow there.
+- Keep the module read-only. A write path through the module breaks the safety
+  argument next to a live mount.
+- Keep `Cargo.lock` committed. The Nix build has no network.
+
+## Conventions
+
+- Follow the `rust-idioms` skill for a Rust style question.
+- Rustfmt and clippy stay mandatory before a commit: `cargo fmt` and
+  `cargo clippy`.
+- Format through `nix fmt` for a tree-wide pass. Do not run a formatter
+  standalone.
+- Commit without GPG signing: `git commit --no-gpg-sign`.
+- Name a chunking change in the commit body. FastCDC and UnixFS answer different
+  questions, and a reader needs to know which one moved.
+
+## Dependencies
+
+| Dependency | Required? | Why |
+|---|---|---|
+| `clap` 4 | required | CLI parse, with `clap_complete` for the shell completions. |
+| `rusqlite` 0.31 | required | SQLite is the store. |
+| `fuser` 0.15 | required | FUSE operations. `libc` supplies the errnos. |
+| `fastcdc` 4 | required | Content-defined chunking for physical dedup. |
+| `sha2` | required | SHA-256 for the CID and the chunk hash. |
+
+- UnixFS v1-2025 uses a custom DAG builder in `src/dag.rs`: raw leaves, a balanced
+  dag-pb tree, per-block offsets. No mature Rust implementation exists, so
+  validate against the `ipfs-chainer` reference.
+- The chunker stays pluggable. FastCDC serves today, and rapidCDC may replace it
+  after an evaluation.
+
+## Open work
+
+- Evaluate rapidCDC against FastCDC.
