@@ -1,20 +1,22 @@
-;;; emacs-module-tests.el --- ERT tests for the sqlitefs Emacs module -*- lexical-binding: t; -*-
+;;; sqlitefs-test.el --- ERT tests for sqlitefs -*- lexical-binding: t; -*-
 
 ;; Run from the repo root after building the module:
 ;;   cargo build --features emacs
-;;   emacs -Q --batch -l test/emacs-module-tests.el
+;;   emacs -Q --batch -l test/sqlitefs-test.el
 ;;
 ;; Nix installCheck overrides the locations via env:
 ;;   SQLITEFS_TEST_BIN     sqlitefs CLI binary
 ;;   SQLITEFS_TEST_MODULE  libsqlitefs.so dynamic module
 
+;;; Code:
+
 (require 'ert)
 (require 'cl-lib)
 
 (defconst sqlitefs-test-root
-  ;; repo root: the directory containing this test/ file
   (file-name-directory
-   (directory-file-name (file-name-directory load-file-name))))
+   (directory-file-name (file-name-directory load-file-name)))
+  "Repo root: the directory that holds this test/ file.")
 
 (defconst sqlitefs-test-target-dir
   (file-name-as-directory
@@ -32,12 +34,15 @@
 ;; Scratch repo: a fresh temp dir per run (the Nix sandbox cannot write
 ;; next to the test sources).
 (defconst sqlitefs-test-dir
-  (file-name-as-directory (make-temp-file "sqlitefs-tests-" t)))
+  (file-name-as-directory (make-temp-file "sqlitefs-tests-" t))
+  "Per-run scratch directory that holds the fixture repo.")
 
 (defconst sqlitefs-test-db
-  (expand-file-name "repo.db" sqlitefs-test-dir))
+  (expand-file-name "repo.db" sqlitefs-test-dir)
+  "SQLite repository file inside `sqlitefs-test-dir'.")
 
 (defun sqlitefs-test--run (&rest args)
+  "Run the sqlitefs CLI with ARGS and assert a zero exit."
   (let ((exit (apply #'call-process sqlitefs-test-bin nil t nil args)))
     (should (= exit 0))))
 
@@ -171,3 +176,6 @@
     (should (string-match "sub" (buffer-string)))))
 
 (ert-run-tests-batch-and-exit)
+
+(provide 'sqlitefs-test)
+;;; sqlitefs-test.el ends here

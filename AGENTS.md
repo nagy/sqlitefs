@@ -21,7 +21,7 @@ Emacs dynamic module.
 | `src/cdc.rs` | Content-defined chunking: FastCDC v2020 plus SHA-256. |
 | `emacs/sqlitefs.el` | Elisp frontend: dired-like repo browser and read-only visit buffers. |
 | `test/default.nix` | NixOS VM test through `nixos-lib.runTest`, wired as `checks.sqlitefs`. |
-| `test/emacs-module-tests.el` | ERT tests for the Emacs module. |
+| `test/sqlitefs-test.el` | ERT tests for the Emacs module and the elisp frontend. |
 | `docs/adr/` | Decision records 0001 to 0005. |
 | `CONTEXT.md` | Domain glossary. |
 
@@ -41,8 +41,9 @@ Emacs dynamic module.
 - `nix develop` — dev shell.
 - `cargo build --features emacs` — build the module into
   `target/debug/libsqlitefs.so`.
-- `emacs -Q --batch -l test/emacs-module-tests.el` — ERT suite in the dev shell.
-  It needs the module built with the feature first.
+- `emacs -Q --batch -l test/sqlitefs-test.el` — ERT suite in the dev shell.
+  It needs the module built with the feature first. `checks.lint` runs
+  checkdoc and package-lint over `emacs/*.el` and `test/*.el`.
 
 ## Architecture
 
@@ -108,9 +109,12 @@ checkout.
 
 The elisp package builds through `pkgs.emacsPackages.melpaBuild`. The recipe
 stages only `emacs/*.el`, and package-build strips the `emacs/` prefix, so the
-installed package root stays flat. The module is a separate cargo build, so
-`postInstall` copies the `.so` into the elpa directory. The ERT suite runs as
-`installCheckPhase`, because elpa2nix compiles the elisp during install.
+installed package root stays flat. package-build writes the `Package-Version`
+header from the recipe version, so the source keeps `;; Version: 0.1.0`. The
+module is a separate cargo build, so `postInstall` copies the `.so` into the
+elpa directory. The ERT suite runs as `installCheckPhase`, because elpa2nix
+compiles the elisp during install. `checks.lint` holds the checkdoc and
+package-lint gate.
 
 ### Snapshot model
 

@@ -156,6 +156,10 @@
 
             preferLocalBuild = true;
 
+            # Emacs writes ~/.emacs.d during byte-compilation, so the build
+            # and the install check get a private writable home.
+            nativeBuildInputs = [ pkgs.writableTmpDirAsHomeHook ];
+
             # Elisp sources + ERT suite only.  The Rust tree stays out, and
             # the module is not in the source at all.
             src = lib.cleanSourceWith {
@@ -169,6 +173,9 @@
             # The elisp sits in emacs/, and package-build strips that common
             # prefix, so the installed package root stays flat.
             files = ''("emacs/*.el")'';
+
+            # package-build writes its own `Package-Version' header from the
+            # recipe version, so the source header keeps only the base version.
 
             # Byte-compilation warnings fail the build.
             turnCompilationWarningToError = true;
@@ -191,19 +198,71 @@
             installCheckPhase = ''
               runHook preInstallCheck
               export SQLITEFS_TEST_BIN=${sqlitefs-emacs}/bin/sqlitefs
+              # Glob the suites so a new test file needs no flake edit.  printf
+              # repeats "-l %s" per match.  failglob turns an empty glob into a
+              # shell error, so the || guard fires even without `set -e'.
+              # The unquoted $test_args must split into -l <file> pairs, which
+              # stays safe because a test file name holds no space.
+              shopt -s failglob
+              test_args=$(printf -- "-l %s " test/*-test.el) || {
+                echo 'no tests matched test/*-test.el' >&2
+                exit 1
+              }
+              shopt -u failglob
               for dir in $out/share/emacs/site-lisp/elpa/sqlitefs-*; do
                 export SQLITEFS_TEST_MODULE=$dir/libsqlitefs.so
-                emacs --batch -L "$dir" -l test/emacs-module-tests.el
+                emacs --batch -L "$dir" $test_args -f ert-run-tests-batch-and-exit
               done
               runHook postInstallCheck
             '';
 
             meta = {
               description = "Emacs interface to sqlitefs repositories (module + elisp)";
+              longDescription = ''
+                Read-only browsing of sqlitefs repositories from Emacs.  A
+                Dired-like tree browser, read-only file buffers and a ref list,
+                backed by a dynamic module that needs no FUSE mount.
+              '';
               license = lib.licenses.agpl3Plus;
+              homepage = "https://github.com/nagy/sqlitefs";
+              maintainers = with lib.maintainers; [ nagy ];
               platforms = lib.platforms.linux;
             };
           };
+
+          # Lint gate for the elisp: checkdoc and package-lint catch what
+          # byte-compilation cannot.  The unpatched source is linted, and
+          # `test/' stays in scope so the suite keeps the same header,
+          # docstring and prefix rules as the code under test.
+          elispLint =
+            pkgs.runCommandLocal "sqlitefs-elisp-lint"
+              {
+                nativeBuildInputs = [
+                  (pkgs.emacsPackages.emacsWithPackages (p: [ p.package-lint ]))
+                  pkgs.writableTmpDirAsHomeHook
+                ];
+                # `src' is pre-filtered to emacs/ and test/, and package-lint
+                # needs a writable tree, so copy it out of the store first.
+                src = emacs-sqlitefs.src;
+                meta.description = "checkdoc and package-lint for the sqlitefs elisp";
+              }
+              ''
+                cp -r "$src"/. .
+                # package-lint assumes an online ELPA.  `package-lint-main-file'
+                # keeps the test file attached to the package it tests instead
+                # of making it its own package with a missing header.
+                emacs --batch -l package-lint \
+                  --eval '(setq package-lint-main-file "emacs/sqlitefs.el")' \
+                  -f package-lint-batch-and-exit \
+                  emacs/*.el test/*.el
+                # checkdoc always exits zero; gate on its output instead.
+                lint_log=$(emacs --batch -l checkdoc \
+                  --eval '(setq checkdoc-arguments-in-order-flag t)' \
+                  --eval '(mapc (lambda (f) (checkdoc-file f)) command-line-args-left)' \
+                  emacs/*.el test/*.el 2>&1)
+                if [ -n "$lint_log" ]; then printf '%s\n' "$lint_log"; exit 1; fi
+                touch $out
+              '';
 
           # Static rustdoc HTML (what `cargo doc` writes to ./target/doc/)
           # installed under $out/share/doc. Reuses the same cargoArtifacts,
@@ -246,6 +305,7 @@
 
           checks.sqlitefs = vmTest;
           checks.emacs-sqlitefs = emacs-sqlitefs;
+          checks.lint = elispLint;
           checks.doctests = doctests;
 
           checks.default = craneLib.cargoTest (

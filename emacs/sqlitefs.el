@@ -1,4 +1,11 @@
-;;; sqlitefs.el --- Browse sqlitefs repos from Emacs -*- lexical-binding: t; -*-
+;;; sqlitefs.el --- Browse sqlitefs repositories -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026 Daniel Nagy
+;; SPDX-License-Identifier: AGPL-3.0-or-later
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "31.1"))
+;; Homepage: https://github.com/nagy/sqlitefs
+;; Keywords: files
 
 ;; Read-only browsing of sqlitefs repositories (single-file, versioned,
 ;; content-addressed — see https://github.com/nagy/sqlitefs) via the
@@ -6,8 +13,8 @@
 
 ;;; Commentary:
 
-;; Load the module once (the cdylib is built with
-;; `cargo build --features emacs'):
+;; Load the module once (the cdylib comes from the crate's dynamic-module
+;; cargo feature):
 
 ;;   (setq sqlitefs-module-path "/path/to/target/debug/libsqlitefs.so")
 ;;   (require 'sqlitefs)
@@ -66,7 +73,7 @@ directories of a dev checkout."
   (unless (fboundp 'sqlitefs-refs)
     (module-load
      (or (sqlitefs--locate-module)
-         (error "sqlitefs module (libsqlitefs.so) not found; set `sqlitefs-module-path' or add it to `load-path'")))))
+         (error "Module libsqlitefs.so not found; set `sqlitefs-module-path' or add it to `load-path'")))))
 
 (defun sqlitefs-refs-alist (db)
   "Return refs of repo DB as an alist ((NAME . CID) ...)."
@@ -86,18 +93,18 @@ directories of a dev checkout."
   (pop-to-buffer "*sqlitefs refs*"))
 
 (defun sqlitefs-ls-entries (db dir &optional ref)
-  "List DIR of repo DB (REF, default \"main\") as parsed entries."
+  "Return parsed entries of repo DB for DIR.  REF defaults to \"main\"."
   (sqlitefs--ensure-module)
   (sqlitefs-ls (expand-file-name db) dir (or ref "main")))
 
 (defun sqlitefs-read-string (db file &optional ref)
-  "Return content of FILE in repo DB (REF, default \"main\")."
+  "Return content of repo DB FILE.  REF defaults to \"main\"."
   (sqlitefs--ensure-module)
   (sqlitefs-read (expand-file-name db) file (or ref "main")))
 
 ;;;###autoload
 (defun sqlitefs-visit (db file &optional ref)
-  "Open FILE from repo DB (REF, default \"main\") in a read-only buffer."
+  "Open repo DB FILE in a read-only buffer.  REF defaults to \"main\"."
   (interactive "fRepository (SQLite file):
 GFile in repo: ")
   (let ((content (sqlitefs-read-string db file ref))
