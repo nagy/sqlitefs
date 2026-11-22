@@ -32,8 +32,9 @@ Emacs dynamic module.
 - `nix build .#sqlitefs-doc` — static rustdoc HTML. Serve `share/doc/` with
   `python3 -m http.server` for an offline read. Doctests run as `checks.doctests`.
 - `nix build .#sqlitefs-emacs` — the Emacs module cdylib.
-- `nix build .#emacs-sqlitefs` — elisp, bytecode, autoloads and the `.so` in one
-  site-lisp tree.
+- `nix build .#emacs-sqlitefs` — the elisp package as `melpaBuild` installs it:
+  bytecode, autoloads and the `.so` in one elpa directory. The version carries
+  the flake source date (`0.1.0-unstable-YYYY-MM-DD`).
 - `nix fmt` — treefmt drives rustfmt, taplo and nixfmt. The rustfmt options are
   CLI args in `flake.nix` (`max_width = 100`, `format_strings = true`,
   `imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`).
@@ -104,6 +105,12 @@ browser, `sqlitefs-visit`, a read-only file buffer, and `sqlitefs-show-refs`. It
 locates the module library through `load-path`, which the Nix package fills with
 the `.so` beside the elisp, and falls back to `target/{debug,release}` for a dev
 checkout.
+
+The elisp package builds through `pkgs.emacsPackages.melpaBuild`. The recipe
+stages only `emacs/*.el`, and package-build strips the `emacs/` prefix, so the
+installed package root stays flat. The module is a separate cargo build, so
+`postInstall` copies the `.so` into the elpa directory. The ERT suite runs as
+`installCheckPhase`, because elpa2nix compiles the elisp during install.
 
 ### Snapshot model
 

@@ -11,12 +11,25 @@
 
   outputs =
     inputs@{
+      self,
       flake-parts,
       nixpkgs,
       crane,
       treefmt-nix,
       ...
     }:
+    # The elisp package has no release tag, so its version carries the date
+    # of the flake source.  A plain path import has no git metadata, so fall
+    # back to the epoch instead of failing.
+    let
+      sourceInfo = self.sourceInfo or { };
+      stamp =
+        let
+          date = sourceInfo.lastModifiedDate or "19700101000000";
+        in
+        if date == null then "19700101000000" else toString date;
+      elispVersion = "0.1.0-unstable-${builtins.substring 0 4 stamp}-${builtins.substring 4 2 stamp}-${builtins.substring 6 2 stamp}";
+    in
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [ treefmt-nix.flakeModule ];
       systems = [ "x86_64-linux" ];
@@ -128,19 +141,23 @@
           );
 
           # emacs-sqlitefs: the elisp package (emacs/sqlitefs.el) plus the
-          # dynamic module in one share/emacs/site-lisp tree. Byte-compiles
-          # with warnings-as-errors and generates autoloads; the ERT suite
-          # runs as an install-check (installCheckPhase, not checkPhase:
-          # stdenv runs checks before install, so plain checkPhase would see
-          # an empty $out). Wired into checks, so `nix flake check` covers
-          # the Emacs integration end to end.
-          emacs-sqlitefs = pkgs.stdenv.mkDerivation {
-            pname = "emacs-sqlitefs";
-            version = "0.1.0";
+          # dynamic module in one elpa directory.  melpaBuild runs
+          # package-build, byte-compiles through elpa2nix with warnings as
+          # errors and generates the autoloads from the ;;;###autoload
+          # cookies.  The module is a separate cargo build, so it enters as
+          # a store path and lands in postInstall.  The ERT suite runs as an
+          # install-check (installCheckPhase, not checkPhase: elpa2nix
+          # compiles during install, so checkPhase would see no $out).
+          # Wired into checks, so `nix flake check` covers the Emacs
+          # integration end to end.
+          emacs-sqlitefs = pkgs.emacsPackages.melpaBuild {
+            pname = "sqlitefs";
+            version = elispVersion;
 
             preferLocalBuild = true;
 
-            # Elisp sources + ERT suite only.
+            # Elisp sources + ERT suite only.  The Rust tree stays out, and
+            # the module is not in the source at all.
             src = lib.cleanSourceWith {
               src = ./.;
               filter =
@@ -149,57 +166,41 @@
                 || (type == "regular" && (lib.hasInfix "/emacs/" path || lib.hasInfix "/test/" path));
             };
 
-            nativeBuildInputs = [
-              pkgs.emacs
-              sqlitefs-emacs
-            ];
+            # The elisp sits in emacs/, and package-build strips that common
+            # prefix, so the installed package root stays flat.
+            files = ''("emacs/*.el")'';
 
-            buildPhase = ''
-              runHook preBuild
+            # Byte-compilation warnings fail the build.
+            turnCompilationWarningToError = true;
 
-              # Module library next to the elisp so `sqlitefs--locate-module'
-              # finds it via `load-path' (also during byte-compilation).
-              install -Dm555 ${sqlitefs-emacs}/lib/libsqlitefs.so \
-                emacs/libsqlitefs.so
-
-              # Byte-compile with warnings as errors.
-              for file in emacs/*.el; do
-                emacs --batch -L emacs \
-                  --eval "(setq byte-compile-error-on-warn t)" \
-                  -f batch-byte-compile "$file"
+            # The elpa directory name carries the version, and the module
+            # file does not exist yet, so a plain glob would vanish under
+            # nullglob.  The loop resolves the directory first.
+            postInstall = ''
+              for dir in $out/share/emacs/site-lisp/elpa/sqlitefs-*; do
+                install -Dm555 ${sqlitefs-emacs}/lib/libsqlitefs.so \
+                  "$dir/libsqlitefs.so"
               done
-
-              # Autoload stamps from the ;;;###autoload cookies.
-              emacs --batch -L emacs -l loaddefs-gen \
-                --eval '(loaddefs-generate "emacs" "emacs/loaddefs.el")'
-
-              runHook postBuild
-            '';
-
-            installPhase = ''
-              runHook preInstall
-              mkdir -p $out/share/emacs/site-lisp
-              # emacs/*.el covers the generated loaddefs.el too.
-              install -m644 emacs/*.el emacs/*.elc \
-                emacs/libsqlitefs.so -t $out/share/emacs/site-lisp
-              runHook postInstall
             '';
 
             # ERT suite runs against the *installed* package (compiled elisp
             # + module library + generated autoloads), with the sqlitefs CLI
-            # from the module build as the repo fixture driver.
+            # from the module build as the repo fixture driver.  The suite
+            # stays in the unpacked source, which melpaBuild leaves in place.
             doInstallCheck = true;
             installCheckPhase = ''
               runHook preInstallCheck
               export SQLITEFS_TEST_BIN=${sqlitefs-emacs}/bin/sqlitefs
-              export SQLITEFS_TEST_MODULE=$out/share/emacs/site-lisp/libsqlitefs.so
-              emacs --batch -L $out/share/emacs/site-lisp \
-                -l test/emacs-module-tests.el
+              for dir in $out/share/emacs/site-lisp/elpa/sqlitefs-*; do
+                export SQLITEFS_TEST_MODULE=$dir/libsqlitefs.so
+                emacs --batch -L "$dir" -l test/emacs-module-tests.el
+              done
               runHook postInstallCheck
             '';
 
             meta = {
               description = "Emacs interface to sqlitefs repositories (module + elisp)";
+              license = lib.licenses.agpl3Plus;
               platforms = lib.platforms.linux;
             };
           };
