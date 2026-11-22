@@ -138,6 +138,8 @@
             pname = "emacs-sqlitefs";
             version = "0.1.0";
 
+            preferLocalBuild = true;
+
             # Elisp sources + ERT suite only.
             src = lib.cleanSourceWith {
               src = ./.;
