@@ -2,6 +2,7 @@
 name = "sqlitefs"
 version = "0.1.0"
 edition = "2024"
+description = "Versioned content-addressed filesystem in a single SQLite file"
 
 [lib]
 crate-type = ["rlib", "cdylib"]

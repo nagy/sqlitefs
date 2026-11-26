@@ -95,8 +95,9 @@
             // {
               inherit cargoArtifacts;
               postInstall = completionInstall;
+              # No description here: crane fills meta.description from the
+              # `description' field in Cargo.toml.
               meta = {
-                description = "Versioned content-addressed filesystem in a single SQLite file";
                 license = lib.licenses.agpl3Plus;
                 mainProgram = "sqlitefs";
                 platforms = lib.platforms.linux;
