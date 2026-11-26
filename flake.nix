@@ -151,85 +151,102 @@
           # compiles during install, so checkPhase would see no $out).
           # Wired into checks, so `nix flake check` covers the Emacs
           # integration end to end.
-          emacs-sqlitefs = pkgs.emacsPackages.melpaBuild {
-            pname = "sqlitefs";
-            version = elispVersion;
+          # Overridable, so a consumer can swap the Emacs or the package set:
+          #   inputs.sqlitefs.packages.${system}.emacs-sqlitefs.override {
+          #     emacs = pkgs.emacs-nox;
+          #   }
+          emacs-sqlitefs = lib.makeOverridable (
+            {
+              # `melpaBuild' closes over the Emacs of its package set, so an
+              # `emacs' argument on the build does nothing. Build the set
+              # against the chosen Emacs instead.
+              emacs ? pkgs.emacs,
+              emacsPackages ? pkgs.emacsPackagesFor emacs,
+              melpaBuild ? emacsPackages.melpaBuild,
+              # The flake passes this, so a plain import stays explicit.
+              elispVersion,
+            }:
+            melpaBuild {
+              pname = "sqlitefs";
+              inherit elispVersion;
+              version = elispVersion;
 
-            preferLocalBuild = true;
+              preferLocalBuild = true;
 
-            # Emacs writes ~/.emacs.d during byte-compilation, so the build
-            # and the install check get a private writable home.
-            nativeBuildInputs = [ pkgs.writableTmpDirAsHomeHook ];
+              # Emacs writes ~/.emacs.d during byte-compilation, so the build
+              # and the install check get a private writable home.
+              nativeBuildInputs = [ pkgs.writableTmpDirAsHomeHook ];
 
-            # Elisp sources + ERT suite only.  The Rust tree stays out, and
-            # the module is not in the source at all.
-            src = lib.cleanSourceWith {
-              src = ./.;
-              filter =
-                path: type:
-                (type == "directory" && (lib.hasInfix "/emacs" path || lib.hasInfix "/test" path))
-                || (type == "regular" && (lib.hasInfix "/emacs/" path || lib.hasInfix "/test/" path));
-            };
+              # Elisp sources + ERT suite only.  The Rust tree stays out, and
+              # the module is not in the source at all.
+              src = lib.cleanSourceWith {
+                src = ./.;
+                filter =
+                  path: type:
+                  (type == "directory" && (lib.hasInfix "/emacs" path || lib.hasInfix "/test" path))
+                  || (type == "regular" && (lib.hasInfix "/emacs/" path || lib.hasInfix "/test/" path));
+              };
 
-            # The elisp sits in emacs/, and package-build strips that common
-            # prefix, so the installed package root stays flat.
-            files = ''("emacs/*.el")'';
+              # The elisp sits in emacs/, and package-build strips that common
+              # prefix, so the installed package root stays flat.
+              files = ''("emacs/*.el")'';
 
-            # package-build writes its own `Package-Version' header from the
-            # recipe version, so the source header keeps only the base version.
+              # package-build writes its own `Package-Version' header from the
+              # recipe version, so the source header keeps only the base version.
 
-            # Byte-compilation warnings fail the build.
-            turnCompilationWarningToError = true;
+              # Byte-compilation warnings fail the build.
+              turnCompilationWarningToError = true;
 
-            # The elpa directory name carries the version, and the module
-            # file does not exist yet, so a plain glob would vanish under
-            # nullglob.  The loop resolves the directory first.
-            postInstall = ''
-              for dir in $out/share/emacs/site-lisp/elpa/sqlitefs-*; do
-                install -Dm555 ${sqlitefs-emacs}/lib/libsqlitefs.so \
-                  "$dir/libsqlitefs.so"
-              done
-            '';
-
-            # ERT suite runs against the *installed* package (compiled elisp
-            # + module library + generated autoloads), with the sqlitefs CLI
-            # from the module build as the repo fixture driver.  The suite
-            # stays in the unpacked source, which melpaBuild leaves in place.
-            doInstallCheck = true;
-            installCheckPhase = ''
-              runHook preInstallCheck
-              export SQLITEFS_TEST_BIN=${sqlitefs-emacs}/bin/sqlitefs
-              # Glob the suites so a new test file needs no flake edit.  printf
-              # repeats "-l %s" per match.  failglob turns an empty glob into a
-              # shell error, so the || guard fires even without `set -e'.
-              # The unquoted $test_args must split into -l <file> pairs, which
-              # stays safe because a test file name holds no space.
-              shopt -s failglob
-              test_args=$(printf -- "-l %s " test/*-test.el) || {
-                echo 'no tests matched test/*-test.el' >&2
-                exit 1
-              }
-              shopt -u failglob
-              for dir in $out/share/emacs/site-lisp/elpa/sqlitefs-*; do
-                export SQLITEFS_TEST_MODULE=$dir/libsqlitefs.so
-                emacs --batch -L "$dir" $test_args -f ert-run-tests-batch-and-exit
-              done
-              runHook postInstallCheck
-            '';
-
-            meta = {
-              description = "Emacs interface to sqlitefs repositories (module + elisp)";
-              longDescription = ''
-                Read-only browsing of sqlitefs repositories from Emacs.  A
-                Dired-like tree browser, read-only file buffers and a ref list,
-                backed by a dynamic module that needs no FUSE mount.
+              # The elpa directory name carries the version, and the module
+              # file does not exist yet, so a plain glob would vanish under
+              # nullglob.  The loop resolves the directory first.
+              postInstall = ''
+                for dir in $out/share/emacs/site-lisp/elpa/sqlitefs-*; do
+                  install -Dm555 ${sqlitefs-emacs}/lib/libsqlitefs.so \
+                    "$dir/libsqlitefs.so"
+                done
               '';
-              license = lib.licenses.agpl3Plus;
-              homepage = "https://github.com/nagy/sqlitefs";
-              maintainers = with lib.maintainers; [ nagy ];
-              platforms = lib.platforms.linux;
-            };
-          };
+
+              # ERT suite runs against the *installed* package (compiled elisp
+              # + module library + generated autoloads), with the sqlitefs CLI
+              # from the module build as the repo fixture driver.  The suite
+              # stays in the unpacked source, which melpaBuild leaves in place.
+              doInstallCheck = true;
+              installCheckPhase = ''
+                runHook preInstallCheck
+                export SQLITEFS_TEST_BIN=${sqlitefs-emacs}/bin/sqlitefs
+                # Glob the suites so a new test file needs no flake edit.  printf
+                # repeats "-l %s" per match.  failglob turns an empty glob into a
+                # shell error, so the || guard fires even without `set -e'.
+                # The unquoted $test_args must split into -l <file> pairs, which
+                # stays safe because a test file name holds no space.
+                shopt -s failglob
+                test_args=$(printf -- "-l %s " test/*-test.el) || {
+                  echo 'no tests matched test/*-test.el' >&2
+                  exit 1
+                }
+                shopt -u failglob
+                for dir in $out/share/emacs/site-lisp/elpa/sqlitefs-*; do
+                  export SQLITEFS_TEST_MODULE=$dir/libsqlitefs.so
+                  emacs --batch -L "$dir" $test_args -f ert-run-tests-batch-and-exit
+                done
+                runHook postInstallCheck
+              '';
+
+              meta = {
+                description = "Emacs interface to sqlitefs repositories (module + elisp)";
+                longDescription = ''
+                  Read-only browsing of sqlitefs repositories from Emacs.  A
+                  Dired-like tree browser, read-only file buffers and a ref list,
+                  backed by a dynamic module that needs no FUSE mount.
+                '';
+                license = lib.licenses.agpl3Plus;
+                homepage = "https://github.com/nagy/sqlitefs";
+                maintainers = with lib.maintainers; [ nagy ];
+                platforms = lib.platforms.linux;
+              };
+            }
+          ) { inherit elispVersion; };
 
           # Lint gate for the elisp: checkdoc and package-lint catch what
           # byte-compilation cannot.  The unpatched source is linted, and
